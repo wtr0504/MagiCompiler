@@ -1,0 +1,6 @@
+# System dependencies (install manually):
+#   sudo apt update && sudo apt install graphviz
+cuda-python
+depyf
+graphviz
+seaborn
