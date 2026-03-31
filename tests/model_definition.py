@@ -190,8 +190,12 @@ class Attention(nn.Module):
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
 
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False, dtype=config.params_dtype)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False, dtype=config.params_dtype)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False, dtype=config.params_dtype)
+        self.k_proj = nn.Linear(
+            self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False, dtype=config.params_dtype
+        )
+        self.v_proj = nn.Linear(
+            self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False, dtype=config.params_dtype
+        )
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False, dtype=config.params_dtype)
 
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
@@ -206,13 +210,10 @@ class Attention(nn.Module):
             v = v.repeat_interleave(self.num_key_value_groups, dim=1)
 
         flash_attn_out = torch.ops.aten._scaled_dot_product_flash_attention(
-            q, k, v,
-            dropout_p=0.0,
-            is_causal=False,
-            return_debug_mask=False
+            q, k, v, dropout_p=0.0, is_causal=False, return_debug_mask=False
         )
         attn_output = flash_attn_out[0]
-        
+
         attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, seq_len, self.hidden_size)
         return self.o_proj(attn_output)
 
@@ -231,6 +232,7 @@ class TransformerMLP(nn.Module):
         up = self.up_proj(x)
         return self.down_proj(gate * up)
 
+
 @magi_compile(dynamic_arg_dims={"x": 0})
 class TransformerBlock(nn.Module):
     """A single Transformer block"""
@@ -241,7 +243,7 @@ class TransformerBlock(nn.Module):
         self.self_attn = Attention(config)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mlp = TransformerMLP(config)
-        
+
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
         residual = x
         x = self.input_layernorm(x).to(torch.bfloat16)
@@ -267,7 +269,7 @@ class Transformer(nn.Module):
         self.layers = nn.ModuleList([TransformerBlock(config) for _ in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False, dtype=config.params_dtype)
-    
+
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
         """Forward pass of the Transformer model.
 
@@ -304,7 +306,9 @@ def create_transformer_model(config: TransformerConfig, device: torch.device) ->
     return model
 
 
-def create_transformer_model_with_initial_params(config: TransformerConfig, device: torch.device) -> tuple[Transformer, list[torch.Tensor]]:
+def create_transformer_model_with_initial_params(
+    config: TransformerConfig, device: torch.device
+) -> tuple[Transformer, list[torch.Tensor]]:
     """Create Transformer model and return model with initial parameter snapshot
 
     Args:

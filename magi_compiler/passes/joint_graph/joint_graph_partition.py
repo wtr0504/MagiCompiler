@@ -83,11 +83,7 @@ def _primal_contributes_to_bwd_directly(
     return False
 
 
-def _push_down_save_node(
-    node: fx.Node,
-    node_info: NodeInfo,
-    op_types: OpTypes,
-) -> Optional[fx.Node]:
+def _push_down_save_node(node: fx.Node, node_info: NodeInfo, op_types: OpTypes) -> Optional[fx.Node]:
     """
     Starting from a compute-intensive node, walk forward through memory-efficient ops
     (views, type-narrowing casts) to find the optimal save point.
@@ -130,11 +126,7 @@ def _push_down_save_node(
 
 
 def _decide_save_node(
-    node: fx.Node,
-    node_info: NodeInfo,
-    primal_set: frozenset,
-    op_types: OpTypes,
-    custom_ops: list[torch._ops.OpOverload],
+    node: fx.Node, node_info: NodeInfo, primal_set: frozenset, op_types: OpTypes, custom_ops: list[torch._ops.OpOverload]
 ) -> Optional[fx.Node]:
     """
     Unified decision function: given any node in the joint graph, return the optimal
@@ -211,10 +203,7 @@ def custom_joint_graph_partition_fn(
     static_lifetime_input_indices: Optional[list[int]] = None,
 ) -> tuple[fx.GraphModule, fx.GraphModule]:
     recompute_config = get_compile_config().recompute_config
-    partition_kwargs = dict(
-        num_fwd_outputs=num_fwd_outputs,
-        static_lifetime_input_indices=static_lifetime_input_indices,
-    )
+    partition_kwargs = dict(num_fwd_outputs=num_fwd_outputs, static_lifetime_input_indices=static_lifetime_input_indices)
 
     save_tensor_nodes: list[fx.Node] = []
     policy = recompute_config.recompute_policy
@@ -238,9 +227,7 @@ def custom_joint_graph_partition_fn(
         raise ValueError(f"Invalid recompute policy: {policy}")
 
     with ctx:
-        fwd_module, bwd_module = min_cut_rematerialization_partition(
-            joint_module, _joint_inputs, compiler, **partition_kwargs
-        )
+        fwd_module, bwd_module = min_cut_rematerialization_partition(joint_module, _joint_inputs, compiler, **partition_kwargs)
 
     joint_graph_vis(joint_module, fwd_module, bwd_module, save_tensor_nodes=save_tensor_nodes or None)
 

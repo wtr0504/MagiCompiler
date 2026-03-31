@@ -20,9 +20,9 @@ from magi_compiler.utils import add_nvtx_event
 from tests.model_definition import (
     MLP,
     MLPConfig,
-    create_mlp_model_with_initial_params,
     Transformer,
     TransformerConfig,
+    create_mlp_model_with_initial_params,
     create_transformer_model_with_initial_params,
 )
 from tests.utils import CleanupCacheContext, enable_remote_debug
@@ -146,7 +146,7 @@ def train_transformer_model(
             target_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device, dtype=torch.long)
 
             # Forward pass
-            with add_nvtx_event("transformer_forward"): 
+            with add_nvtx_event("transformer_forward"):
                 output = model(input_ids)
 
             # Compute loss, divided by accumulation steps to maintain effective batch size consistency
@@ -253,7 +253,7 @@ def test_transformer_training_with_magi_compiler():
         num_key_value_heads=16,
         max_position_embeddings=1024,
         rms_norm_eps=1e-6,
-        params_dtype=torch.bfloat16
+        params_dtype=torch.bfloat16,
     )
 
     # Create model and save initial parameters
