@@ -16,7 +16,15 @@ import pytest
 import torch
 import torch.nn as nn
 
-from tests.model_definition import MLP, MLPConfig, create_mlp_model_with_initial_params
+from magi_compiler.utils import add_nvtx_event
+from tests.model_definition import (
+    MLP,
+    MLPConfig,
+    Transformer,
+    TransformerConfig,
+    create_mlp_model_with_initial_params,
+    create_transformer_model_with_initial_params,
+)
 from tests.utils import CleanupCacheContext, enable_remote_debug
 
 
@@ -71,6 +79,82 @@ def train_mlp_model(
 
             # Backward pass (gradients are automatically accumulated)
             loss.backward()
+
+            # Accumulate loss for logging (multiply by accumulation steps to restore original value)
+            epoch_loss_sum += loss.item() * gradient_accumulation_steps
+
+            # Update parameters after accumulating gradient_accumulation_steps batches
+            if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                optimizer.step()
+
+        # Handle the last incomplete accumulation batch
+        if batches_per_epoch % gradient_accumulation_steps != 0:
+            optimizer.step()
+            optimizer.zero_grad()
+
+        avg_loss = epoch_loss_sum / batches_per_epoch
+        epoch_losses.append(avg_loss)
+        print(f"Epoch {epoch + 1}/{num_epochs}, Average Loss: {avg_loss:.6f}")
+
+    print("Training completed!")
+    return epoch_losses
+
+
+def train_transformer_model(
+    model: Transformer,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    batch_size: int,
+    seq_len: int,
+    vocab_size: int,
+    num_epochs: int,
+    batches_per_epoch: int,
+    gradient_accumulation_steps: int = 1,
+) -> list[float]:
+    """Execute training loop for Transformer model (supports gradient accumulation)
+
+    Args:
+        model: Transformer model to train
+        optimizer: Optimizer
+        device: Training device
+        batch_size: Number of sequences per batch
+        seq_len: Length of each sequence
+        vocab_size: Vocabulary size
+        num_epochs: Number of training epochs
+        batches_per_epoch: Number of batches per epoch
+        gradient_accumulation_steps: Gradient accumulation steps, default is 1 (no accumulation)
+
+    Returns:
+        epoch_losses: List of average losses per epoch
+    """
+    epoch_losses = []
+
+    print(f"Starting Transformer training: {num_epochs} epochs, {batches_per_epoch} batches per epoch")
+    if gradient_accumulation_steps > 1:
+        print(f"Using gradient accumulation, accumulation steps: {gradient_accumulation_steps}")
+
+    for epoch in range(num_epochs):
+        epoch_loss_sum = 0.0
+
+        for batch_idx in range(batches_per_epoch):
+            # Zero gradients at the start of each accumulation cycle
+            if batch_idx % gradient_accumulation_steps == 0:
+                optimizer.zero_grad()
+
+            # Generate random input and target data
+            input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device, dtype=torch.long)
+            target_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device, dtype=torch.long)
+
+            # Forward pass
+            with add_nvtx_event("transformer_forward"):
+                output = model(input_ids)
+
+            # Compute loss, divided by accumulation steps to maintain effective batch size consistency
+            loss = nn.functional.cross_entropy(output.view(-1, vocab_size), target_ids.view(-1)) / gradient_accumulation_steps
+
+            # Backward pass (gradients are automatically accumulated)
+            with add_nvtx_event("transformer_backward"):
+                loss.backward()
 
             # Accumulate loss for logging (multiply by accumulation steps to restore original value)
             epoch_loss_sum += loss.item() * gradient_accumulation_steps
@@ -152,9 +236,63 @@ def test_mlp_training_with_magi_compiler():
     print("Test passed: Model successfully completed multiple training epochs, parameters have been updated")
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available, skipping test")
+def test_transformer_training_with_magi_compiler():
+    """Test Transformer training with magi_compiler in training scenario"""
+
+    # Set device
+    device = torch.device("cuda")
+
+    # Create Transformer configuration
+    transformer_config = TransformerConfig(
+        vocab_size=10000,
+        hidden_size=1024,
+        intermediate_size=4096,
+        num_hidden_layers=2,
+        num_attention_heads=16,
+        num_key_value_heads=16,
+        max_position_embeddings=1024,
+        rms_norm_eps=1e-6,
+        params_dtype=torch.bfloat16,
+    )
+
+    # Create model and save initial parameters
+    model, initial_params = create_transformer_model_with_initial_params(transformer_config, device)
+
+    # Create optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+
+    # Training parameters
+    batch_size = 8
+    seq_len = 1024 * 4
+    vocab_size = transformer_config.vocab_size
+    num_epochs = 4
+    batches_per_epoch = 2
+
+    # Execute training
+    epoch_losses = train_transformer_model(
+        model=model,
+        optimizer=optimizer,
+        device=device,
+        batch_size=batch_size,
+        seq_len=seq_len,
+        vocab_size=vocab_size,
+        num_epochs=num_epochs,
+        batches_per_epoch=batches_per_epoch,
+    )
+
+    # Verify model parameters have been updated
+    params_updated = verify_model_parameters_updated(initial_params=initial_params, current_params=list(model.parameters()))
+
+    assert params_updated, "Transformer model parameters should change after training"
+
+    print("Test passed: Transformer model successfully completed multiple training epochs, parameters have been updated")
+
+
 if __name__ == "__main__":
     # Usage:
     # ENABLE_REMOTE_DEBUG=true MAGI_ENABLE_FX_GRAPH_VIZ=true TORCH_LOGS=aot CUDA_VISIBLE_DEVICES=1 python pkgs/MagiCompiler/tests/test_mlp_training.py
     with CleanupCacheContext():
         enable_remote_debug()
         test_mlp_training_with_magi_compiler()
+        test_transformer_training_with_magi_compiler()
