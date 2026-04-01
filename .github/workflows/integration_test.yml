@@ -36,15 +36,22 @@ jobs:
                 git config --global http.proxy "${{ secrets.HTTP_PROXY }}"
                 git config --global https.proxy "${{ secrets.HTTPS_PROXY }}"
 
-        -   name: Checkout PR
+        -   name: Checkout base branch
+            uses: actions/checkout@v4
+            timeout-minutes: 5
+            with:
+                ref: ${{ github.event.pull_request.base.sha }}
+                fetch-depth: 1
+                persist-credentials: false
+
+        -   name: Checkout PR head
             uses: actions/checkout@v4
             timeout-minutes: 5
             with:
                 ref: ${{ github.event.pull_request.head.sha }}
                 fetch-depth: 1
-
-        -   name: Fetch Base Branch for Diff
-            run: git fetch origin ${{ github.event.pull_request.base.sha }} --depth=1
+                persist-credentials: false
+                clean: false
 
         -   name: Check Chinese Characters
             run: python3 .github/workflows/check_chinese_chars.py
