@@ -190,12 +190,14 @@ class InductorStandaloneAdaptor(CompilerInterface):
             dynamic_shapes = "from_tracing_context"
 
         # Step2: Compile the graph
+        import torch._functorch.config as functorch_config
         from torch._inductor import standalone_compile
 
         try:
-            compiled_graph = standalone_compile(
-                graph, example_inputs, dynamic_shapes=dynamic_shapes, options={"config_patches": current_config}
-            )
+            with functorch_config.patch(autograd_cache_allow_custom_autograd_functions=True):
+                compiled_graph = standalone_compile(
+                    graph, example_inputs, dynamic_shapes=dynamic_shapes, options={"config_patches": current_config}
+                )
         except torch._dynamo.exc.RestartAnalysis as e:
             if key is not None:
                 self._restart_analysis_counts[key] = self._restart_analysis_counts.get(key, 0) + 1
@@ -212,21 +214,13 @@ class InductorStandaloneAdaptor(CompilerInterface):
             raise
 
         # Step3: Save the compiled artifact
-        # When standalone_compile is invoked from within a torch.compile backend,
-        # AOTAutograd's cache key computation may be silently bypassed, leaving
-        # aot_autograd artifacts empty. In that case save() will raise an
-        # AssertionError, so we fall back to running without a cache handle.
-        # TODO: Support caching the compiled artifact.
+        # autograd_cache_allow_custom_autograd_functions=True is required above so that
+        # autograd_function_apply (a HigherOrderOperator) does not bypass AOTAutograd cache
+        # key computation, which would leave aot_autograd_artifacts empty and cause save() to fail.
         assert key is not None
         restart_analysis_count = self._restart_analysis_counts.get(key, 0)
         if hasattr(self, "cache_dir") and self.cache_dir is not None:
             try:
-                # Workaround for empty aot_autograd artifacts
-                if getattr(compiled_graph, "_artifacts", None) is not None:
-                    _, cache_info = compiled_graph._artifacts
-                    if not cache_info.artifacts.get("aot_autograd"):
-                        cache_info.artifacts["aot_autograd"] = [key]
-
                 path: Path = self.cache_dir / key
                 compiled_graph.save(path=path.as_posix(), format="unpacked")
                 compilation_counter.num_compiled_artifacts_saved += 1
