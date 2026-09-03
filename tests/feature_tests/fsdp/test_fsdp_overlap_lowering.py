@@ -190,6 +190,26 @@ def test_lowering_reads_forward_dtype_from_method_kwargs(dist_1rank):
 
 
 @requires_cuda
+def test_lowering_records_shard_evenness_on_the_gather(dist_1rank):
+    """The gather carries whether its ``Shard(0)`` divides evenly.
+
+    This is the flag the copy-engine rewrite and the bucketing read to decide the
+    transport, and it has to be present: a missing key reads as falsy, i.e. "even",
+    which is exactly the wrong default.  It is computed from F and world, so it is the
+    same on every rank -- unlike the local shard length, which is what makes the pad
+    appear on the trailing ranks only.
+    """
+    from magi_compiler.passes.fsdp_overlap import lower_prim_redistribute_to_collectives
+
+    gm = _build_redistribute_graph(dist_1rank, "layer_weight", rows=8)
+    assert lower_prim_redistribute_to_collectives(gm) == 1
+
+    ag = [n for n in gm.graph.nodes if n.op == "call_function" and n.target is _AG]
+    assert "magi_fsdp_uneven_shard" in ag[0].meta
+    assert ag[0].meta["magi_fsdp_uneven_shard"] is False  # 8 rows over a 1-rank mesh
+
+
+@requires_cuda
 def test_lowering_gather_and_wait_are_separate_nodes(dist_1rank):
     """Launch and wait must be DISTINCT nodes (so the reorder can move the launch
     independently of the wait) -- the whole point of lowering."""

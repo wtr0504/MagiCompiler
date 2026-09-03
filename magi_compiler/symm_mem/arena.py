@@ -172,13 +172,28 @@ def barrier_after_load() -> None:
 
 
 def _is_gatherable_shard(t: object) -> bool:
-    """A Shard(0) DTensor on a 1-D mesh -- the only placement the copy-engine gather handles."""
+    """An EVENLY split Shard(0) DTensor on a 1-D mesh -- the only placement the
+    copy-engine gather handles.
+
+    Uneven ``Shard(0)`` (``dim0 % world != 0``) is excluded on purpose, for three
+    reasons that all trace back to the trailing ranks owning fewer rows: the window
+    would be sized from a rank-dependent local numel, so ``rendezvous`` rejects it
+    outright once the difference survives ``ALIGN``; below that threshold it is worse
+    than an error, because every shard after the uneven one lands at a different
+    offset per rank while ``peer_views`` slices each peer at the LOCAL offset; and the
+    gather copies one fixed-size slab per peer, which would read past a shorter
+    peer's rows.  ``dim0`` and the mesh size are identical on every rank, so all
+    ranks drop the same parameters and the offset walk stays symmetric.  Dropped
+    weights keep their ordinary allocation and gather over NCCL.
+    """
     from torch.distributed.tensor import DTensor, Shard
 
     if not isinstance(t, DTensor):
         return False
     placements = t.placements
-    return len(placements) == 1 and isinstance(placements[0], Shard) and placements[0].dim == 0
+    if not (len(placements) == 1 and isinstance(placements[0], Shard) and placements[0].dim == 0):
+        return False
+    return int(t.shape[0]) % int(t.device_mesh.size(0)) == 0
 
 
 def _group_name_of(t) -> str | None:

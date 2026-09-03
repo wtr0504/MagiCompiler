@@ -70,13 +70,23 @@ def _is_weight_all_gather(node: fx.Node) -> bool:
 
 
 def _local_shard_bytes(ag: fx.Node) -> int:
-    """Bytes of the local (pre-gather) shard feeding a weight all_gather -- i.e. how
-    much this rank contributes to the collective.  Used to cap coalesced bucket size."""
-    loc = ag.args[0]
-    m = loc.meta.get("example_value")
+    """Bytes one rank contributes to a weight all_gather -- the gathered size divided
+    by the world, NOT the local shard's own meta.
+
+    Used to cap coalesced bucket size, so it has to be rank-identical: ranks that cut
+    a bucket at different members submit coalesced launches with different membership,
+    which never completes.  Reading the gather's INPUT meta happens to be safe for a
+    graph this repo lowered -- the trailing ranks of an uneven ``Shard(0)`` own fewer
+    rows, but the pad in front of the gather brings them back to ``chunk`` -- and that
+    is far too subtle a thing to rest a collective on.  A gather matched by
+    ``_gathers_a_weight`` rather than emitted by the lowering has no such pad.  The
+    gather's own ``example_value`` is ``(world * chunk, ...)`` on every rank
+    unconditionally."""
+    m = ag.meta.get("example_value")
     if m is None:
         return 0
-    return int(m.numel()) * int(m.element_size())
+    _loc, world, _group = ag.args
+    return int(m.numel()) * int(m.element_size()) // int(world)
 
 
 def _split_by_dtype_and_size(
@@ -159,6 +169,7 @@ def _coalesce_one_bucket(graph: fx.GraphModule, node_index: dict[fx.Node, int], 
         coalesced.meta["example_value"] = list(ag_metas)
         coalesced.meta["magi_fsdp_weight_ag"] = True
         coalesced.meta["magi_fsdp_weight_ag_coalesced"] = True
+        coalesced.meta["magi_fsdp_uneven_shard"] = any(ag.meta.get("magi_fsdp_uneven_shard") for ag in ag_nodes)
 
         outs = []
         for i, am in enumerate(ag_metas):

@@ -176,6 +176,12 @@ def lower_prim_redistribute_to_collectives(graph: fx.GraphModule) -> int:
             # Mark as a SimpleFSDP weight gather so the per-submod bucketing pass
             # can coalesce these into a single all_gather_into_tensor_coalesced.
             ag.meta["magi_fsdp_weight_ag"] = True
+            # Whether this Shard(0) divides evenly, recorded from F and world -- both
+            # the same on every rank.  Downstream transport choices must key off THIS
+            # and never off `L`: L is what makes the pad above appear on the trailing
+            # ranks only, so a predicate that reads the pad splits one collective into
+            # copy-engine on some ranks and NCCL on others, which never completes.
+            ag.meta["magi_fsdp_uneven_shard"] = world * chunk != F
 
             wait = graph.graph.call_function(_WAIT, (ag,))
             wait.meta["example_value"] = local.new_empty((world * chunk, *local.shape[1:]), dtype=cur_dtype)

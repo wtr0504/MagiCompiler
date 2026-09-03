@@ -39,10 +39,13 @@ def lower_and_bucket_full_graph(
     the byte cap in program order (see ``bucket_weight_all_gather_coalesced``).
     0 = no cap (one bucket per (group, dtype) run).
 
-    ``transport="copy_engine"`` buckets *first* (only arena-shard gathers, so
-    cast/pad stays out of the bucket), then retargets both the leftover singles
-    and the coalesced launches at the copy-engine ops.  The wrapper still runs
-    one gather per member; reorder just sees one comm node per bucket.
+    ``transport="copy_engine"`` buckets *first* (only arena-shard gathers, so a cast
+    of the shard and an unevenly split weight stay out of the bucket), then retargets
+    both the leftover singles and the coalesced launches at the copy-engine ops.  The
+    wrapper still runs one gather per member; reorder just sees one comm node per
+    bucket.  Bucket membership therefore depends on the eligibility predicate, which
+    is why that predicate has to answer identically on every rank -- see
+    ``symm_ag_rewrite._is_uneven_shard``.
 
     Returns the number of buckets created.
     """

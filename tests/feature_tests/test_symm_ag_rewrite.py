@@ -69,12 +69,17 @@ def _symm_op():
     return SYMM_ALL_GATHER
 
 
-def _graph_with_gathers(mesh, n: int, *, derive: str | None = None, marked: bool = True, shapes: list[tuple] | None = None):
+def _graph_with_gathers(
+    mesh, n: int, *, derive: str | None = None, marked: bool = True, shapes: list[tuple] | None = None, uneven: bool = False
+):
     """``n`` weight gathers reading their shards, in program order.
 
     ``derive`` inserts a cast or a pad between the shard and the gather, the two
     shapes the lowering pass emits for mixed precision and uneven sharding.
-    ``shapes`` gives the per-gather local shard shape.
+    ``shapes`` gives the per-gather local shard shape.  ``uneven`` sets the
+    rank-identical flag the lowering pass puts on a gather whose ``Shard(0)`` does
+    not divide evenly -- independently of ``derive``, because the ranks that own a
+    full chunk of an uneven weight get no pad at all.
     """
     from torch.distributed.tensor import Shard, distribute_tensor
 
@@ -101,6 +106,7 @@ def _graph_with_gathers(mesh, n: int, *, derive: str | None = None, marked: bool
         ag.meta["example_value"] = local._local_tensor.new_empty(local._local_tensor.shape)
         if marked:
             ag.meta["magi_fsdp_weight_ag"] = True
+            ag.meta["magi_fsdp_uneven_shard"] = uneven
         outs.append(g.call_function(_WAIT, (ag,)))
     g.output(tuple(outs))
     return fx.GraphModule(torch.nn.Module(), g)
@@ -142,13 +148,70 @@ def test_group_args_are_preserved(mesh_1rank):
 @pytest.mark.parametrize("derive", ["cast", "pad"])
 def test_derived_shards_stay_on_nccl(mesh_1rank, derive):
     """A cast or pad output is not in the symmetric window; retargeting it would
-    be rejected at run time, so it must stay on NCCL."""
+    be rejected at run time, so it must stay on NCCL.
+
+    Both graphs here are the same on every rank: ``forward_dtype`` is a model-wide
+    setting, and the pad is spliced into every gather.  The case where only *some*
+    ranks see the pad is a different property, covered by
+    ``test_uneven_shard_stays_on_nccl_without_a_pad``.
+    """
     from magi_compiler.passes.fsdp_overlap import rewrite_weight_ag_to_copy_engine
 
     gm = _graph_with_gathers(mesh_1rank, 3, derive=derive)
     assert rewrite_weight_ag_to_copy_engine(gm) == 0
     assert len(_gathers(gm, _AG)) == 3
     assert not _gathers(gm, _symm_op())
+
+
+@requires_cuda
+def test_uneven_shard_stays_on_nccl_without_a_pad(mesh_1rank):
+    """The half of an uneven ``Shard(0)`` that the pad does not mark.
+
+    ``ceil(F / world)`` rows go to the leading ranks and the remainder to the trailing
+    ones, so only the trailing ranks get a pad.  A rank that owns a full chunk sees a
+    clean ``to_local`` and nothing in its own graph says the weight is unevenly split.
+    If it decides from the input shape alone it moves to the copy engine while its
+    peers stay on NCCL, and their all-gather waits on a rank that will never join it.
+    So the decision is made from the flag, which is derived from F and world and is
+    therefore the same everywhere.
+    """
+    from magi_compiler.passes.fsdp_overlap import rewrite_weight_ag_to_copy_engine
+
+    gm = _graph_with_gathers(mesh_1rank, 3, uneven=True)
+    assert rewrite_weight_ag_to_copy_engine(gm) == 0
+    assert len(_gathers(gm, _AG)) == 3
+    assert not _gathers(gm, _symm_op())
+
+
+@requires_cuda
+def test_uneven_shard_does_not_join_a_copy_engine_bucket(mesh_1rank):
+    """Bucket membership is a transport decision too: a bucket is one submission, and
+    an uneven weight inside a copy-engine bucket would take the whole bucket with it."""
+    from magi_compiler.passes.fsdp_overlap import lower_and_bucket_full_graph
+    from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER_COALESCED
+
+    gm = _graph_with_gathers(mesh_1rank, 3, uneven=True)
+    assert lower_and_bucket_full_graph(gm, "coalesced", bucket_size_bytes=0, transport="copy_engine") == 0
+    assert len(_gathers(gm, _AG)) == 3
+    assert not _gathers(gm, SYMM_ALL_GATHER_COALESCED)
+
+
+@requires_cuda
+def test_uneven_shard_does_not_hold_back_its_even_neighbours(mesh_1rank):
+    """Only the uneven weight loses the copy engine.  Excluding it from the bucket
+    must not split the even weights around it into separate buckets either, or the
+    fix would cost throughput on every model with one odd-shaped weight."""
+    from magi_compiler.passes.fsdp_overlap import lower_and_bucket_full_graph
+    from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER_COALESCED
+
+    gm = _graph_with_gathers(mesh_1rank, 4)
+    _gathers(gm, _AG)[1].meta["magi_fsdp_uneven_shard"] = True
+
+    assert lower_and_bucket_full_graph(gm, "coalesced", bucket_size_bytes=0, transport="copy_engine") == 1
+    coalesced = _gathers(gm, SYMM_ALL_GATHER_COALESCED)
+    assert len(coalesced) == 1
+    assert len(coalesced[0].args[0]) == 3  # the three even weights, in one bucket
+    assert len(_gathers(gm, _AG)) == 1  # the uneven one, alone, on NCCL
 
 
 @requires_cuda

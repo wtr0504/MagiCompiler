@@ -23,8 +23,14 @@ _ALL_GATHER = torch.ops._c10d_functional.all_gather_into_tensor.default
 _ALL_GATHER_COALESCED = torch.ops._c10d_functional.all_gather_into_tensor_coalesced.default
 
 
+def _is_uneven_shard(node: fx.Node) -> bool:
+    return bool(node.meta.get("magi_fsdp_uneven_shard"))
+
+
 def _input_is_arena_shard(node: fx.Node) -> bool:
     """True when the gather input is ``to_local(placeholder/get_attr)`` with no intervening op."""
+    if _is_uneven_shard(node):
+        return False
     src = node.args[0] if node.args else None
     if not isinstance(src, fx.Node) or src.op != "call_method" or src.target != "to_local":
         return False
@@ -33,6 +39,8 @@ def _input_is_arena_shard(node: fx.Node) -> bool:
 
 
 def _coalesced_inputs_are_arena_shards(node: fx.Node) -> bool:
+    if _is_uneven_shard(node):
+        return False
     locs = node.args[0] if node.args else None
     if not isinstance(locs, (list, tuple)) or not locs:
         return False
@@ -75,7 +83,7 @@ def rewrite_weight_ag_to_copy_engine(graph: fx.GraphModule) -> int:
         graph.recompile()
     magi_logger.info(
         "FSDP copy-engine rewrite: %d weight all-gather(s) retargeted, "
-        "%d left on NCCL (input is a cast/pad of the shard, not the shard itself)",
+        "%d left on NCCL (input is a cast of the shard, or the shard is unevenly split)",
         rewritten,
         skipped,
     )
