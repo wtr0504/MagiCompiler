@@ -18,7 +18,7 @@ Single rank, so the copies are device-to-self and the values are trivially
 checkable -- what is under test here is the plumbing that is easy to get subtly
 wrong and hard to see: that the untouched ``wait_tensor`` really does pick up our
 event through the work registry, that two in-flight gathers do not alias, and
-that a shard the arena never saw is rejected loudly rather than gathering
+that a shard the buffer never saw is rejected loudly rather than gathering
 garbage.
 
 The transport itself (peer reads, overlap, ordering under load) needs several
@@ -72,12 +72,12 @@ def _clean_state():
     reset_registry()
 
 
-def _arena_model(mesh, hidden: int = 64, n_layers: int = 3, dtype=torch.bfloat16):
-    """A meta-built, Shard(0)-sharded model materialized into a symmetric arena,
+def _symm_model(mesh, hidden: int = 64, n_layers: int = 3, dtype=torch.bfloat16):
+    """A meta-built, Shard(0)-sharded model materialized into a symmetric buffer,
     exactly the shape step 1 produces."""
     from torch.distributed.tensor import Shard, distribute_tensor
 
-    from magi_compiler.symm_mem import materialize_into_arenas
+    from magi_compiler.symm_mem import materialize_into_buffers
 
     class Block(nn.Module):
         def __init__(self):
@@ -93,16 +93,16 @@ def _arena_model(mesh, hidden: int = 64, n_layers: int = 3, dtype=torch.bfloat16
     device = torch.device("cuda", 0)
     from torch.distributed.tensor import DTensor
 
-    from magi_compiler.symm_mem.arena import _arena_key, register_shard
+    from magi_compiler.symm_mem.symm_buffer import _buffer_key, register_shard
 
-    arenas = materialize_into_arenas(model, device)
+    buffers = materialize_into_buffers(model, device)
     views: dict[int, torch.Tensor] = {}
 
     def materialize(t):
         if isinstance(t, DTensor):
-            arena = arenas[_arena_key(t)]
-            local = arena.take(t._local_tensor.shape)
-            register_shard(local, arena)
+            buffer = buffers[_buffer_key(t)]
+            local = buffer.take(t._local_tensor.shape)
+            register_shard(local, buffer)
             views[id(t)] = local
             return DTensor.from_local(local, t.device_mesh, t.placements, run_check=False)
         return torch.empty_like(t, device=device)
@@ -119,7 +119,7 @@ def _arena_model(mesh, hidden: int = 64, n_layers: int = 3, dtype=torch.bfloat16
 
 @requires_cuda
 def test_gather_matches_nccl_bitwise(mesh_1rank):
-    _, shards = _arena_model(mesh_1rank)
+    _, shards = _symm_model(mesh_1rank)
 
     for shard in shards:
         got = _WAIT(torch.ops.magi.symm_all_gather(shard, 1, ""))
@@ -132,7 +132,7 @@ def test_gather_matches_nccl_bitwise(mesh_1rank):
 @requires_cuda
 def test_coalesced_wrap_matches_per_member_gather(mesh_1rank):
     """The thin wrap is per-member dests; each wait must match a single gather."""
-    _, shards = _arena_model(mesh_1rank)
+    _, shards = _symm_model(mesh_1rank)
     outs = torch.ops.magi.symm_all_gather_coalesced(list(shards), 1, "")
     assert len(outs) == len(shards)
     for out, shard in zip(outs, shards):
@@ -144,7 +144,7 @@ def test_coalesced_wrap_matches_per_member_gather(mesh_1rank):
 @requires_cuda
 def test_wait_tensor_picks_up_the_registered_event(mesh_1rank):
     """The launch registers a Work; the *stock* wait_tensor must consume it."""
-    _, shards = _arena_model(mesh_1rank)
+    _, shards = _symm_model(mesh_1rank)
     shard = shards[0]
 
     out = _WAIT(torch.ops.magi.symm_all_gather(shard, 1, ""))
@@ -156,7 +156,7 @@ def test_wait_tensor_picks_up_the_registered_event(mesh_1rank):
 def test_each_gather_returns_a_fresh_buffer(mesh_1rank):
     """Two live gathers must land in different buffers, or a prefetched weight
     would be overwritten before its consumer ran."""
-    _, shards = _arena_model(mesh_1rank)
+    _, shards = _symm_model(mesh_1rank)
     a = torch.ops.magi.symm_all_gather(shards[0], 1, "")
     b = torch.ops.magi.symm_all_gather(shards[1], 1, "")
     _WAIT(a)
@@ -169,7 +169,7 @@ def test_each_gather_returns_a_fresh_buffer(mesh_1rank):
 
 @requires_cuda
 def test_unregistered_shard_is_rejected(mesh_1rank):
-    """A weight the arena never claimed has no peer views, so gathering it would
+    """A weight the buffer never claimed has no peer views, so gathering it would
     read whatever happens to be at that address.  Fail instead."""
     ordinary = torch.ones(8, 4, device="cuda", dtype=torch.bfloat16)
     with pytest.raises(RuntimeError, match="not a registered symmetric-memory shard"):
@@ -178,7 +178,7 @@ def test_unregistered_shard_is_rejected(mesh_1rank):
 
 @requires_cuda
 def test_group_size_mismatch_is_rejected(mesh_1rank):
-    _, shards = _arena_model(mesh_1rank)
+    _, shards = _symm_model(mesh_1rank)
     with pytest.raises(RuntimeError, match="peers but the gather asks for"):
         torch.ops.magi.symm_all_gather(shards[0], 4, "")
 
@@ -188,7 +188,7 @@ def test_coalesced_validates_every_member_before_allocating(mesh_1rank):
     """One bad member must fail the whole call.  Allocating the dests first and
     discovering it halfway through would leave the earlier members' copies in
     flight against buffers nobody waits on."""
-    _, shards = _arena_model(mesh_1rank)
+    _, shards = _symm_model(mesh_1rank)
     ordinary = torch.ones(8, 4, device="cuda", dtype=torch.bfloat16)
     with pytest.raises(RuntimeError, match="not a registered symmetric-memory shard"):
         torch.ops.magi.symm_all_gather_coalesced([shards[0], ordinary], 1, "")
@@ -271,7 +271,7 @@ def test_per_peer_fallback_matches_the_batched_path(mesh_1rank, monkeypatch):
     only path there and is never exercised on the boxes we develop on."""
     from magi_compiler.symm_mem import all_gather as ag_mod
 
-    _, shards = _arena_model(mesh_1rank)
+    _, shards = _symm_model(mesh_1rank)
     batched = _WAIT(torch.ops.magi.symm_all_gather(shards[0], 1, ""))
     torch.cuda.synchronize()
 

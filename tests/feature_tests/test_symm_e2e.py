@@ -14,7 +14,7 @@
 
 """End-to-end guard for ``fsdp_config.transport="copy_engine"``.
 
-The unit tests each stub something out: the arena tests materialize by calling
+The unit tests each stub something out: the buffer tests materialize by calling
 ``_apply`` with a hand-forged lambda, and the gather tests run on one rank where
 the peer view is the local shard.  The property that only shows up when the
 whole chain runs -- meta build, SimpleFSDP, ``to_empty``, checkpoint load,

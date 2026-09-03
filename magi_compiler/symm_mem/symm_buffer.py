@@ -28,7 +28,7 @@ from magi_compiler.utils import magi_logger
 _TO_EMPTY_LAMBDA = "Module.to_empty.<locals>.<lambda>"
 
 
-class SymmArena:
+class SymmBuffer:
     """One symmetric-memory window, suballocated to many weight shards.
 
     One window per (decorated block, dtype, process group): a single rendezvous,
@@ -71,7 +71,7 @@ class SymmArena:
         self._cursor += self._round(numel)
         if self._cursor > self._reserved:
             raise RuntimeError(
-                f"symmetric arena overflow: wanted {self._cursor} elems, reserved {self._reserved}. "
+                f"symmetric buffer overflow: wanted {self._cursor} elems, reserved {self._reserved}. "
                 "The sizing walk and the dispensing walk must visit the same shards in the same order."
             )
         return self.buf[off : off + numel].view(shape)
@@ -104,7 +104,7 @@ class SymmArena:
 class ShardEntry:
     """What the run-time gather needs to know about one local shard."""
 
-    arena: SymmArena
+    buffer: SymmBuffer
     offset: int
     local: torch.Tensor
     peer_views: tuple[torch.Tensor, ...]
@@ -116,12 +116,12 @@ class ShardEntry:
 
 # Keyed by ``data_ptr()``: the gather op only sees a plain tensor.
 _SHARD_REGISTRY: dict[int, ShardEntry] = {}
-_ARENAS: list[SymmArena] = []
+_BUFFERS: list[SymmBuffer] = []
 _BARRIER_DONE = False
 
 
-def register_shard(local: torch.Tensor, arena: SymmArena) -> ShardEntry:
-    entry = ShardEntry(arena=arena, offset=arena.offset_of(local), local=local, peer_views=tuple(arena.peer_views(local)))
+def register_shard(local: torch.Tensor, buffer: SymmBuffer) -> ShardEntry:
+    entry = ShardEntry(buffer=buffer, offset=buffer.offset_of(local), local=local, peer_views=tuple(buffer.peer_views(local)))
     _SHARD_REGISTRY[local.data_ptr()] = entry
     return entry
 
@@ -130,8 +130,8 @@ def lookup_shard(data_ptr: int) -> ShardEntry | None:
     return _SHARD_REGISTRY.get(data_ptr)
 
 
-def registered_arenas() -> list[SymmArena]:
-    return list(_ARENAS)
+def registered_buffers() -> list[SymmBuffer]:
+    return list(_BUFFERS)
 
 
 def find_shard_by_layout(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor | None:
@@ -144,10 +144,10 @@ def find_shard_by_layout(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Te
 
 
 def reset_registry() -> None:
-    """Test-only: drop every arena so a new model can be built in-process."""
+    """Test-only: drop every buffer so a new model can be built in-process."""
     global _BARRIER_DONE
     _SHARD_REGISTRY.clear()
-    _ARENAS.clear()
+    _BUFFERS.clear()
     _BARRIER_DONE = False
 
 
@@ -157,16 +157,16 @@ def barrier_after_load() -> None:
     Must run after weights are loaded and before the first peer read.
     """
     global _BARRIER_DONE
-    if _BARRIER_DONE or not _ARENAS:
+    if _BARRIER_DONE or not _BUFFERS:
         return
     if dist.is_available() and dist.is_initialized():
         torch.cuda.synchronize()
         dist.barrier()
     _BARRIER_DONE = True
     magi_logger.info(
-        "Symmetric arena: published %d arena(s), %.1f MiB, %d shards; steady state is barrier-free",
-        len(_ARENAS),
-        sum(a.nbytes for a in _ARENAS) / 2**20,
+        "SymmBuffer: published %d buffer(s), %.1f MiB, %d shards; steady state is barrier-free",
+        len(_BUFFERS),
+        sum(b.nbytes for b in _BUFFERS) / 2**20,
         len(_SHARD_REGISTRY),
     )
 
@@ -203,7 +203,7 @@ def _group_name_of(t) -> str | None:
         return None
 
 
-def _arena_key(t) -> tuple[torch.dtype, str]:
+def _buffer_key(t) -> tuple[torch.dtype, str]:
     """One window per (dtype, process group). Same dtype on two meshes (gaga4 FSDP + edp) must not share a window."""
     group_name = _group_name_of(t)
     if group_name is None:
@@ -225,40 +225,40 @@ def _apply_order_entries(mod: nn.Module):
             yield mod, name, p
 
 
-def _plan_arenas(shards: list, device: torch.device) -> dict[tuple[torch.dtype, str], SymmArena]:
+def _plan_buffers(shards: list, device: torch.device) -> dict[tuple[torch.dtype, str], SymmBuffer]:
     """Size and commit one window per (dtype, group). Dedup by identity so a tied weight reserves a single slot."""
-    arenas: dict[tuple[torch.dtype, str], SymmArena] = {}
+    buffers: dict[tuple[torch.dtype, str], SymmBuffer] = {}
     seen: set[int] = set()
     for p in shards:
         if id(p) in seen:
             continue
         seen.add(id(p))
-        key = _arena_key(p)
-        arena = arenas.get(key)
-        if arena is None:
-            arena = arenas[key] = SymmArena(p.dtype, device, key[1])
-        arena.reserve(p._local_tensor.numel())
+        key = _buffer_key(p)
+        buffer = buffers.get(key)
+        if buffer is None:
+            buffer = buffers[key] = SymmBuffer(p.dtype, device, key[1])
+        buffer.reserve(p._local_tensor.numel())
 
-    for arena in arenas.values():
-        arena.commit()  # the only collective, once per window
-    _ARENAS.extend(arenas.values())
-    return arenas
+    for buffer in buffers.values():
+        buffer.commit()  # the only collective, once per window
+    _BUFFERS.extend(buffers.values())
+    return buffers
 
 
-def materialize_into_arenas(mod: nn.Module, device: torch.device) -> dict[tuple[torch.dtype, str], SymmArena]:
+def materialize_into_buffers(mod: nn.Module, device: torch.device) -> dict[tuple[torch.dtype, str], SymmBuffer]:
     """Size windows for ``mod``'s Shard(0) shards while they are still on meta. Non-gatherable params are left to the caller."""
     shards = [p for _, _, p in _apply_order_entries(mod) if _is_gatherable_shard(p)]
     if not shards:
         return {}
-    return _plan_arenas(shards, device)
+    return _plan_buffers(shards, device)
 
 
-def migrate_to_arenas(root: nn.Module) -> dict[tuple[torch.dtype, str], SymmArena]:
+def migrate_to_buffers(root: nn.Module) -> dict[tuple[torch.dtype, str], SymmBuffer]:
     """Copy already-allocated Shard(0) shards into symmetric memory.
 
     Used when ``magi_compile(model, ...)`` is given a live model rather than a
     meta + ``to_empty`` path.  ``load_state_dict(assign=True)`` after this would
-    replace arena views with ordinary tensors; the gather then rejects them.
+    replace buffer views with ordinary tensors; the gather then rejects them.
     """
     entries = [(m, n, p) for m, n, p in _apply_order_entries(root) if _is_gatherable_shard(p)]
     if not entries:
@@ -267,7 +267,7 @@ def migrate_to_arenas(root: nn.Module) -> dict[tuple[torch.dtype, str], SymmAren
     device = entries[0][2]._local_tensor.device
     if device.type != "cuda":
         raise RuntimeError(f"symmetric memory needs the shards on cuda, found {device}")
-    arenas = _plan_arenas([p for _, _, p in entries], device)
+    buffers = _plan_buffers([p for _, _, p in entries], device)
 
     from torch.distributed.tensor import DTensor
 
@@ -275,23 +275,23 @@ def migrate_to_arenas(root: nn.Module) -> dict[tuple[torch.dtype, str], SymmAren
     for owner, name, p in entries:
         local = views.get(id(p))
         if local is None:
-            arena = arenas[_arena_key(p)]
-            local = views[id(p)] = arena.take(p._local_tensor.shape)
+            buffer = buffers[_buffer_key(p)]
+            local = views[id(p)] = buffer.take(p._local_tensor.shape)
             local.copy_(p._local_tensor)
-            register_shard(local, arena)
+            register_shard(local, buffer)
         moved = DTensor.from_local(local, p.device_mesh, p.placements, run_check=False)
         owner.register_parameter(name, nn.Parameter(moved, requires_grad=p.requires_grad))
 
     magi_logger.info(
-        "Symmetric arena: migrated %d shard(s) into %.1f MiB across %d window(s)",
+        "SymmBuffer: migrated %d shard(s) into %.1f MiB across %d window(s)",
         len(views),
-        sum(a.nbytes for a in arenas.values()) / 2**20,
-        len(arenas),
+        sum(b.nbytes for b in buffers.values()) / 2**20,
+        len(buffers),
     )
-    return arenas
+    return buffers
 
 
-def patch_symm_arena_apply(cls: type[nn.Module]) -> None:
+def patch_symm_buffer_apply(cls: type[nn.Module]) -> None:
     """Install the ``_apply`` interception on a decorated class.
 
     Mirrors ``_patch_cpu_offload_apply``: take over for ``to_empty``'s lambda, delegate everything else.
@@ -299,19 +299,19 @@ def patch_symm_arena_apply(cls: type[nn.Module]) -> None:
     if getattr(cls, "_magi_symm_apply_patched", False):
         return
     orig_apply = cls._apply
-    magi_logger.info("Symmetric arena: intercepting %s._apply for copy-engine FSDP", cls.__name__)
+    magi_logger.info("SymmBuffer: intercepting %s._apply for copy-engine FSDP", cls.__name__)
 
     def _symm_apply(self, fn, recurse: bool = True):
         if getattr(fn, "__qualname__", "") != _TO_EMPTY_LAMBDA:
             return orig_apply(self, fn, recurse)
-        if getattr(self, "_magi_symm_arenas", None) is not None:
+        if getattr(self, "_magi_symm_buffers", None) is not None:
             return orig_apply(self, fn, recurse)
 
         device = torch.device(inspect.getclosurevars(fn).nonlocals["device"])
         from torch.distributed.tensor import DTensor
 
-        arenas = materialize_into_arenas(self, device)
-        if not arenas:
+        buffers = materialize_into_buffers(self, device)
+        if not buffers:
             return orig_apply(self, fn, recurse)
 
         views: dict[int, torch.Tensor] = {}
@@ -322,21 +322,21 @@ def patch_symm_arena_apply(cls: type[nn.Module]) -> None:
             # Tied weight: same view so tying survives materialization.
             local = views.get(id(t))
             if local is None:
-                arena = arenas[_arena_key(t)]
-                local = views[id(t)] = arena.take(t._local_tensor.shape)
-                register_shard(local, arena)
+                buffer = buffers[_buffer_key(t)]
+                local = views[id(t)] = buffer.take(t._local_tensor.shape)
+                register_shard(local, buffer)
             return DTensor.from_local(local, t.device_mesh, t.placements, run_check=False)
 
         # Do not forge to_empty's qualname: a nested decorated block must fail
-        # the check above and delegate, so its params land in *this* arena.
+        # the check above and delegate, so its params land in *this* buffer.
         out = orig_apply(self, materialize, recurse)
-        self._magi_symm_arenas = arenas
+        self._magi_symm_buffers = buffers
         magi_logger.info(
-            "Symmetric arena: %s materialized %d shard(s) into %.1f MiB across %d window(s)",
+            "SymmBuffer: %s materialized %d shard(s) into %.1f MiB across %d window(s)",
             cls.__name__,
             len(views),
-            sum(a.nbytes for a in arenas.values()) / 2**20,
-            len(arenas),
+            sum(b.nbytes for b in buffers.values()) / 2**20,
+            len(buffers),
         )
         return out
 

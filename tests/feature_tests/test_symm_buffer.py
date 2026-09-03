@@ -131,26 +131,26 @@ def _make_block_cls(transport: str) -> type:
 
 
 @requires_cuda
-def test_root_to_empty_puts_block_shards_in_arena(mesh_1rank):
+def test_root_to_empty_puts_block_shards_in_buffer(mesh_1rank):
     """The decorated block claims its own subtree; the rest stays ordinary."""
-    from magi_compiler.symm_mem import lookup_shard, registered_arenas
+    from magi_compiler.symm_mem import lookup_shard, registered_buffers
 
     hidden, n_layers = 64, 3
     model = _make_root(_make_block_cls("copy_engine"), hidden, n_layers, torch.bfloat16)
     _shard(model, mesh_1rank)
     model.to_empty(device=torch.device("cuda", 0))
 
-    arenas = registered_arenas()
-    assert len(arenas) == 1, "one window per (dtype, group), not one per weight"
-    arena = arenas[0]
+    buffers = registered_buffers()
+    assert len(buffers) == 1, "one window per (dtype, group), not one per weight"
+    buffer = buffers[0]
 
     block_shards = list(model.block.parameters())
     assert len(block_shards) == 2 * n_layers
-    assert all(arena.contains(p._local_tensor) for p in block_shards)
+    assert all(buffer.contains(p._local_tensor) for p in block_shards)
     assert all(lookup_shard(p._local_tensor.data_ptr()) is not None for p in block_shards)
 
     # Outside the decorated class: untouched by the interception.
-    assert not arena.contains(model.head.weight._local_tensor)
+    assert not buffer.contains(model.head.weight._local_tensor)
     assert lookup_shard(model.head.weight._local_tensor.data_ptr()) is None
 
     # Still ordinary, working DTensors on real storage.
@@ -161,18 +161,18 @@ def test_root_to_empty_puts_block_shards_in_arena(mesh_1rank):
 @requires_cuda
 def test_nccl_transport_leaves_allocation_alone(mesh_1rank):
     """The default transport must not install the interception at all."""
-    from magi_compiler.symm_mem import registered_arenas
+    from magi_compiler.symm_mem import registered_buffers
 
     model = _make_root(_make_block_cls("nccl"), 64, 2, torch.bfloat16)
     _shard(model, mesh_1rank)
     model.to_empty(device=torch.device("cuda", 0))
 
-    assert registered_arenas() == []
+    assert registered_buffers() == []
     assert all(p._local_tensor.device.type == "cuda" for p in model.parameters())
 
 
 @requires_cuda
-def test_peer_view_round_trips_through_arena(mesh_1rank):
+def test_peer_view_round_trips_through_buffer(mesh_1rank):
     """A shard written locally must be visible through its own peer view: this is
     the addressing the copy-engine gather depends on."""
     from magi_compiler.symm_mem import lookup_shard
@@ -201,7 +201,7 @@ def test_tied_weights_share_one_slot(mesh_1rank):
     ``data_parallel`` calls ``distribute_tensor`` per module, which replaces each
     entry with its own DTensor and unties them on its own.
     """
-    from magi_compiler.symm_mem import registered_arenas
+    from magi_compiler.symm_mem import registered_buffers
 
     hidden = 64
 
@@ -219,19 +219,19 @@ def test_tied_weights_share_one_slot(mesh_1rank):
     model.block.b.weight = model.block.a.weight
     model.to_empty(device=torch.device("cuda", 0))
 
-    arena = registered_arenas()[0]
+    buffer = registered_buffers()[0]
     assert model.block.a.weight is model.block.b.weight, "tying must survive materialization"
-    assert arena.contains(model.block.a.weight._local_tensor)
+    assert buffer.contains(model.block.a.weight._local_tensor)
     # One slot in the window, not two.
-    slot = arena.ALIGN * ((hidden * hidden + arena.ALIGN - 1) // arena.ALIGN)
-    assert arena.nbytes == slot * torch.bfloat16.itemsize
+    slot = buffer.ALIGN * ((hidden * hidden + buffer.ALIGN - 1) // buffer.ALIGN)
+    assert buffer.nbytes == slot * torch.bfloat16.itemsize
 
 
 @requires_cuda
-def test_nested_decorated_block_shares_the_outer_arena(mesh_1rank):
+def test_nested_decorated_block_shares_the_outer_buffer(mesh_1rank):
     """A decorated block inside a decorated block must not open a second window:
     the inner one has to fail the lambda check and delegate."""
-    from magi_compiler.symm_mem import registered_arenas
+    from magi_compiler.symm_mem import registered_buffers
 
     inner_cls = _decorate(
         type(
@@ -261,25 +261,25 @@ def test_nested_decorated_block_shares_the_outer_arena(mesh_1rank):
     _shard(model, mesh_1rank)
     model.to_empty(device=torch.device("cuda", 0))
 
-    arenas = registered_arenas()
-    assert len(arenas) == 1, f"nested decoration opened {len(arenas)} windows"
-    assert arenas[0].contains(model.block.own.weight._local_tensor)
-    assert arenas[0].contains(model.block.inner.lin.weight._local_tensor)
+    buffers = registered_buffers()
+    assert len(buffers) == 1, f"nested decoration opened {len(buffers)} windows"
+    assert buffers[0].contains(model.block.own.weight._local_tensor)
+    assert buffers[0].contains(model.block.inner.lin.weight._local_tensor)
 
 
 @requires_cuda
 def test_non_shard0_placement_falls_back(mesh_1rank):
     """Replicate weights are not gatherable, so they must be allocated normally
-    rather than silently placed in the arena."""
+    rather than silently placed in the buffer."""
     from torch.distributed.tensor import Replicate
 
-    from magi_compiler.symm_mem import registered_arenas
+    from magi_compiler.symm_mem import registered_buffers
 
     model = _make_root(_make_block_cls("copy_engine"), 64, 2, torch.bfloat16)
     _shard(model, mesh_1rank, placement=Replicate())
     model.to_empty(device=torch.device("cuda", 0))
 
-    assert registered_arenas() == []
+    assert registered_buffers() == []
     assert all(p._local_tensor.device.type == "cuda" for p in model.block.parameters())
 
 
@@ -294,18 +294,18 @@ def test_two_process_groups_same_dtype_get_two_windows(mesh_1rank, monkeypatch):
     """
     from torch.distributed.tensor import Shard, distribute_tensor
 
-    from magi_compiler.symm_mem import arena as sa
+    from magi_compiler.symm_mem import symm_buffer as sb
 
     hidden = 64
     a = nn.Parameter(distribute_tensor(torch.empty(hidden, hidden, dtype=torch.bfloat16), mesh_1rank, [Shard(0)]))
     b = nn.Parameter(distribute_tensor(torch.empty(hidden, hidden, dtype=torch.bfloat16), mesh_1rank, [Shard(0)]))
 
-    monkeypatch.setattr(sa, "_group_name_of", lambda p, _a=a: "dense_fsdp" if p is _a else "edp")
-    monkeypatch.setattr(sa.SymmArena, "commit", lambda self: None)
-    arenas = sa._plan_arenas([a, b], torch.device("cuda", 0))
-    assert set(arenas) == {(torch.bfloat16, "dense_fsdp"), (torch.bfloat16, "edp")}
-    assert arenas[(torch.bfloat16, "dense_fsdp")].group_name == "dense_fsdp"
-    assert arenas[(torch.bfloat16, "edp")].group_name == "edp"
+    monkeypatch.setattr(sb, "_group_name_of", lambda p, _a=a: "dense_fsdp" if p is _a else "edp")
+    monkeypatch.setattr(sb.SymmBuffer, "commit", lambda self: None)
+    buffers = sb._plan_buffers([a, b], torch.device("cuda", 0))
+    assert set(buffers) == {(torch.bfloat16, "dense_fsdp"), (torch.bfloat16, "edp")}
+    assert buffers[(torch.bfloat16, "dense_fsdp")].group_name == "dense_fsdp"
+    assert buffers[(torch.bfloat16, "edp")].group_name == "edp"
 
 
 @requires_cuda
@@ -331,14 +331,14 @@ def group_name():
     return dist.group.WORLD.group_name
 
 
-def _committed_arena(group_name, numels, dtype=torch.bfloat16):
-    from magi_compiler.symm_mem import SymmArena
+def _committed_buffer(group_name, numels, dtype=torch.bfloat16):
+    from magi_compiler.symm_mem import SymmBuffer
 
-    arena = SymmArena(dtype, torch.device("cuda", 0), group_name)
+    buffer = SymmBuffer(dtype, torch.device("cuda", 0), group_name)
     for n in numels:
-        arena.reserve(n)
-    arena.commit()
-    return arena
+        buffer.reserve(n)
+    buffer.commit()
+    return buffer
 
 
 @requires_cuda
@@ -346,16 +346,16 @@ def test_shards_are_dispensed_at_aligned_offsets(mesh_1rank, group_name):
     """Slots are padded to ``ALIGN`` for copy-engine throughput, so the second
     shard does not start where the first one ends.  ``offset_of`` is what the
     peer views are built from, so it has to agree with what ``take`` handed out."""
-    from magi_compiler.symm_mem import SymmArena
+    from magi_compiler.symm_mem import SymmBuffer
 
     rows, cols = 3, 5  # 15 elems: deliberately not a multiple of ALIGN
-    arena = _committed_arena(group_name, [rows * cols, rows * cols])
-    first = arena.take((rows, cols))
-    second = arena.take((rows, cols))
+    buffer = _committed_buffer(group_name, [rows * cols, rows * cols])
+    first = buffer.take((rows, cols))
+    second = buffer.take((rows, cols))
 
-    assert arena.offset_of(first) == 0
-    assert arena.offset_of(second) == SymmArena.ALIGN
-    assert arena.contains(first) and arena.contains(second)
+    assert buffer.offset_of(first) == 0
+    assert buffer.offset_of(second) == SymmBuffer.ALIGN
+    assert buffer.contains(first) and buffer.contains(second)
     assert first.shape == (rows, cols)
 
 
@@ -364,19 +364,19 @@ def test_dispensing_more_than_was_reserved_is_an_error(mesh_1rank, group_name):
     """The sizing walk and the dispensing walk are two separate traversals; if
     they ever disagree the shards silently overlap, so the window must run out
     rather than hand back memory reserved for someone else."""
-    arena = _committed_arena(group_name, [64])
-    arena.take((8, 8))
-    with pytest.raises(RuntimeError, match="symmetric arena overflow"):
-        arena.take((8, 8))
+    buffer = _committed_buffer(group_name, [64])
+    buffer.take((8, 8))
+    with pytest.raises(RuntimeError, match="symmetric buffer overflow"):
+        buffer.take((8, 8))
 
 
 @requires_cuda
 def test_contains_rejects_memory_outside_the_window(mesh_1rank, group_name):
     """``contains`` is how the rewrite decides a weight is gatherable; a caching
     allocator tensor must never pass."""
-    arena = _committed_arena(group_name, [64])
-    arena.take((8, 8))
-    assert not arena.contains(torch.empty(8, 8, device="cuda", dtype=torch.bfloat16))
+    buffer = _committed_buffer(group_name, [64])
+    buffer.take((8, 8))
+    assert not buffer.contains(torch.empty(8, 8, device="cuda", dtype=torch.bfloat16))
 
 
 @requires_cuda
@@ -386,11 +386,11 @@ def test_find_shard_by_layout_matches_on_shape_and_dtype(mesh_1rank, group_name)
     be a None it can degrade on, not a wrong-dtype shard it would gather."""
     from magi_compiler.symm_mem import find_shard_by_layout, register_shard
 
-    arena = _committed_arena(group_name, [8 * 4, 16 * 4])
-    small = arena.take((8, 4))
-    large = arena.take((16, 4))
-    register_shard(small, arena)
-    register_shard(large, arena)
+    buffer = _committed_buffer(group_name, [8 * 4, 16 * 4])
+    small = buffer.take((8, 4))
+    large = buffer.take((16, 4))
+    register_shard(small, buffer)
+    register_shard(large, buffer)
 
     assert find_shard_by_layout((8, 4), torch.bfloat16) is small
     assert find_shard_by_layout((16, 4), torch.bfloat16) is large
@@ -399,31 +399,31 @@ def test_find_shard_by_layout_matches_on_shape_and_dtype(mesh_1rank, group_name)
 
 
 @requires_cuda
-def test_reset_registry_drops_arenas_and_shards(mesh_1rank, group_name):
+def test_reset_registry_drops_buffers_and_shards(mesh_1rank, group_name):
     """Tests and the multi-model path rebuild in-process; a stale entry would let
     a freed shard's address answer a lookup."""
-    from magi_compiler.symm_mem import find_shard_by_layout, lookup_shard, register_shard, registered_arenas, reset_registry
+    from magi_compiler.symm_mem import find_shard_by_layout, lookup_shard, register_shard, registered_buffers, reset_registry
 
-    arena = _committed_arena(group_name, [8 * 4])
-    shard = arena.take((8, 4))
-    register_shard(shard, arena)
+    buffer = _committed_buffer(group_name, [8 * 4])
+    shard = buffer.take((8, 4))
+    register_shard(shard, buffer)
     assert lookup_shard(shard.data_ptr()) is not None
 
     reset_registry()
-    assert registered_arenas() == []
+    assert registered_buffers() == []
     assert lookup_shard(shard.data_ptr()) is None
     assert find_shard_by_layout((8, 4), torch.bfloat16) is None
 
 
 # ---------------------------------------------------------------------------
-# migrate_to_arenas -- the live-model path (magi_compile on an already
+# migrate_to_buffers -- the live-model path (magi_compile on an already
 # materialized model, where there is no to_empty to intercept).
 # ---------------------------------------------------------------------------
 @requires_cuda
 def test_migrate_moves_live_shards_and_keeps_their_values(mesh_1rank):
     """Unlike ``to_empty``, this runs on weights that already hold data, so the
     copy is load-bearing: dropping it would gather uninitialized memory."""
-    from magi_compiler.symm_mem import lookup_shard, migrate_to_arenas
+    from magi_compiler.symm_mem import lookup_shard, migrate_to_buffers
 
     hidden = 64
 
@@ -437,13 +437,13 @@ def test_migrate_moves_live_shards_and_keeps_their_values(mesh_1rank):
     _shard(model, mesh_1rank)
     before = {n: p._local_tensor.clone() for n, p in model.named_parameters()}
 
-    arenas = migrate_to_arenas(model)
-    assert len(arenas) == 1
-    arena = next(iter(arenas.values()))
+    buffers = migrate_to_buffers(model)
+    assert len(buffers) == 1
+    buffer = next(iter(buffers.values()))
 
     for name, p in model.named_parameters():
         local = p._local_tensor
-        assert arena.contains(local), f"{name} was not migrated"
+        assert buffer.contains(local), f"{name} was not migrated"
         assert lookup_shard(local.data_ptr()) is not None
         assert torch.equal(local, before[name]), f"{name} lost its values"
 
@@ -453,7 +453,7 @@ def test_migrate_gives_a_tied_weight_one_slot(mesh_1rank):
     """Migration rebuilds each parameter, so python identity does not survive --
     what must survive is the storage, or the tie is gone and the window is
     overflowed by a walk that sized it once."""
-    from magi_compiler.symm_mem import migrate_to_arenas
+    from magi_compiler.symm_mem import migrate_to_buffers
 
     hidden = 64
 
@@ -467,21 +467,21 @@ def test_migrate_gives_a_tied_weight_one_slot(mesh_1rank):
     _shard(model, mesh_1rank)
     model.b.weight = model.a.weight
 
-    arenas = migrate_to_arenas(model)
-    arena = next(iter(arenas.values()))
+    buffers = migrate_to_buffers(model)
+    buffer = next(iter(buffers.values()))
     assert model.a.weight._local_tensor.data_ptr() == model.b.weight._local_tensor.data_ptr()
-    slot = arena.ALIGN * ((hidden * hidden + arena.ALIGN - 1) // arena.ALIGN)
-    assert arena.nbytes == slot * torch.bfloat16.itemsize
+    slot = buffer.ALIGN * ((hidden * hidden + buffer.ALIGN - 1) // buffer.ALIGN)
+    assert buffer.nbytes == slot * torch.bfloat16.itemsize
 
 
 @requires_cuda
 def test_migrate_refuses_a_model_that_was_never_materialized(mesh_1rank):
-    """``migrate_to_arenas`` is the live-model entry point, so being handed a
+    """``migrate_to_buffers`` is the live-model entry point, so being handed a
     still-on-meta model is the way it gets misused.  Copying from meta silently
     produces a window of uninitialized weights, so it has to fail instead."""
     from torch.distributed.tensor import DTensor, Shard
 
-    from magi_compiler.symm_mem import migrate_to_arenas
+    from magi_compiler.symm_mem import migrate_to_buffers
 
     with torch.device("meta"):
         model = nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
@@ -490,14 +490,14 @@ def test_migrate_refuses_a_model_that_was_never_materialized(mesh_1rank):
     assert model.weight._local_tensor.is_meta  # the state under test
 
     with pytest.raises(RuntimeError, match="needs the shards on cuda"):
-        migrate_to_arenas(model)
+        migrate_to_buffers(model)
 
 
 @requires_cuda
 def test_migrate_leaves_a_model_with_no_gatherable_shards_alone(mesh_1rank):
     """A plain (unsharded) model must not open an empty window."""
-    from magi_compiler.symm_mem import migrate_to_arenas, registered_arenas
+    from magi_compiler.symm_mem import migrate_to_buffers, registered_buffers
 
     model = nn.Linear(8, 8, bias=False, dtype=torch.bfloat16).to("cuda")
-    assert migrate_to_arenas(model) == {}
-    assert registered_arenas() == []
+    assert migrate_to_buffers(model) == {}
+    assert registered_buffers() == []

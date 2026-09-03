@@ -263,7 +263,7 @@ def test_end_to_end_lowering_then_rewrite(mesh_1rank):
 
 @requires_cuda
 def test_copy_engine_buckets_then_rewrites_coalesced(mesh_1rank):
-    """Phase-1 wrap: arena gathers are bucketed first, then the coalesced
+    """Phase-1 wrap: SymmBuffer gathers are bucketed first, then the coalesced
     launch is retargeted.  Members stay separate dests underneath."""
     from magi_compiler.passes.fsdp_overlap import lower_and_bucket_full_graph
     from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER, SYMM_ALL_GATHER_COALESCED
@@ -281,7 +281,7 @@ def test_copy_engine_buckets_then_rewrites_coalesced(mesh_1rank):
 
 @requires_cuda
 def test_copy_engine_does_not_bucket_cast_gathers(mesh_1rank):
-    """Cast outputs are not arena shards; they must stay on NCCL and not join a CE bucket."""
+    """Cast outputs are not SymmBuffer shards; they must stay on NCCL and not join a CE bucket."""
     from magi_compiler.passes.fsdp_overlap import lower_and_bucket_full_graph
     from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER_COALESCED
 
@@ -327,7 +327,7 @@ def _coalesced_graph(mesh, n: int, *, derive: str | None = None, marked: bool = 
 
 
 @requires_cuda
-def test_coalesced_of_arena_shards_is_retargeted(mesh_1rank):
+def test_coalesced_of_symm_shards_is_retargeted(mesh_1rank):
     from magi_compiler.passes.fsdp_overlap import rewrite_weight_ag_to_copy_engine
     from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER_COALESCED
 
@@ -340,7 +340,7 @@ def test_coalesced_of_arena_shards_is_retargeted(mesh_1rank):
 @requires_cuda
 def test_coalesced_is_all_or_nothing(mesh_1rank):
     """A bucket is one submission, so it can only go to the copy engine if
-    *every* member is an arena shard -- one cast member has to keep the whole
+    *every* member is an SymmBuffer shard -- one cast member has to keep the whole
     bucket on NCCL rather than being gathered from an address with no peers."""
     from magi_compiler.passes.fsdp_overlap import rewrite_weight_ag_to_copy_engine
     from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER_COALESCED

@@ -181,7 +181,7 @@ def test_reorder_graph_mismatch_slot_mode():
 @requires_torchrun
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires >=2 GPUs")
 def test_reorder_copy_engine_recognition():
-    """world=2, gathers served by the copy engine out of a symmetric arena.
+    """world=2, gathers served by the copy engine out of a symmetric buffer.
 
     The gather is an opaque fallback kernel, so if the pass fails to see through
     it nothing is planned and ``gathers`` comes out 0.  Destinations are fresh

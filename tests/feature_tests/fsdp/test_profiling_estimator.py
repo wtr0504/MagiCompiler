@@ -705,18 +705,18 @@ def _ce_group_name() -> str:
 
 def _register_shards(shapes, dtype=torch.bfloat16):
     """Register ``shapes`` as real symmetric-memory shards, filled distinctly."""
-    from magi_compiler.symm_mem import SymmArena, register_shard
+    from magi_compiler.symm_mem import SymmBuffer, register_shard
 
-    arena = SymmArena(dtype, torch.device("cuda", 0), _ce_group_name())
+    buffer = SymmBuffer(dtype, torch.device("cuda", 0), _ce_group_name())
     for shape in shapes:
-        arena.reserve(shape[0] * shape[1])
-    arena.commit()
+        buffer.reserve(shape[0] * shape[1])
+    buffer.commit()
 
     shards = []
     for i, shape in enumerate(shapes):
-        s = arena.take(shape)
+        s = buffer.take(shape)
         s.fill_(i + 1)
-        register_shard(s, arena)
+        register_shard(s, buffer)
         shards.append(s)
     torch.cuda.synchronize()
     return shards
@@ -730,7 +730,7 @@ def _ce_replay_snode(shapes, coalesced=False):
 
 @requires_cuda
 def test_symm_ag_replay_gathers_the_registered_shard(pg_1rank, symm_registry):
-    """The replay must run the real op on a real arena shard: a gather of an
+    """The replay must run the real op on a real SymmBuffer shard: a gather of an
     ordinary ``empty`` has no peers and would be rejected, leaving the cost model
     on the analytical estimate it was installed to replace."""
     (shard,) = _register_shards([(_CE_ROWS, 64)])

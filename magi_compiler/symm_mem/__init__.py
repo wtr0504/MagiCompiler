@@ -19,30 +19,30 @@
 whether the copy-engine transport is available.  Import that module by path.
 """
 
-from .arena import (
+from .symm_buffer import (
     ShardEntry,
-    SymmArena,
+    SymmBuffer,
     barrier_after_load,
     find_shard_by_layout,
     lookup_shard,
-    materialize_into_arenas,
-    migrate_to_arenas,
-    patch_symm_arena_apply,
+    materialize_into_buffers,
+    migrate_to_buffers,
+    patch_symm_buffer_apply,
     register_shard,
-    registered_arenas,
+    registered_buffers,
     reset_registry,
 )
 
 __all__ = [
     "ShardEntry",
-    "SymmArena",
+    "SymmBuffer",
     "barrier_after_load",
     "find_shard_by_layout",
     "lookup_shard",
-    "materialize_into_arenas",
-    "migrate_to_arenas",
-    "patch_symm_arena_apply",
+    "materialize_into_buffers",
+    "migrate_to_buffers",
+    "patch_symm_buffer_apply",
     "register_shard",
-    "registered_arenas",
+    "registered_buffers",
     "reset_registry",
 ]

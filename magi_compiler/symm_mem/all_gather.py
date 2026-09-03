@@ -22,12 +22,12 @@ import torch._C._distributed_c10d as _c10d
 
 from magi_compiler.utils import magi_logger
 
-from .arena import lookup_shard
+from .symm_buffer import lookup_shard
 
 _LIB = torch.library.Library("magi", "FRAGMENT")
 # Signatures mirror ``_c10d_functional::all_gather_into_tensor`` / ``_coalesced`` so
 # the rewrite pass can retarget a node without rebuilding its args.  That is also the
-# only reason ``group_name`` is here: the copy engine reads peers from the arena.
+# only reason ``group_name`` is here: the copy engine reads peers from the SymmBuffer.
 _SCHEMA = "symm_all_gather(Tensor local, int group_size, str group_name) -> Tensor"
 _SCHEMA_COALESCED = "symm_all_gather_coalesced(Tensor[] shards, int group_size, str group_name) -> Tensor[]"
 
@@ -134,7 +134,7 @@ def _shard_peers(local: torch.Tensor, group_size: int) -> tuple[torch.Tensor, ..
     if entry is None:
         raise RuntimeError(
             "magi::symm_all_gather got a tensor that is not a registered symmetric-memory shard. "
-            "Only weights materialized through the arena can be gathered by the copy engine; "
+            "Only weights materialized through a SymmBuffer can be gathered by the copy engine; "
             "the rewrite pass should have left this gather on NCCL."
         )
     peers = entry.peer_views

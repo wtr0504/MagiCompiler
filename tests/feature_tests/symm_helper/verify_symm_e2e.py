@@ -23,7 +23,7 @@ decorated block's patched ``_apply`` claims its own subtree on the way down.
 The builder here is deliberately ignorant of symmetric memory, because the real
 one is too.
 
-Then a checkpoint load writes into the arena views (``copy_``, not ``assign``),
+Then a checkpoint load writes into the buffer views (``copy_``, not ``assign``),
 ``@magi_compile`` compiles the block, the rewrite pass retargets the gathers,
 and the reorder pass hoists them.  Checked at the end:
 
@@ -120,7 +120,7 @@ def _load_into_shards(model: nn.Module, state: dict[str, torch.Tensor]) -> None:
     """Write each rank's slice of the checkpoint into the shard it already owns.
 
     ``copy_`` into the existing storage, never ``load_state_dict(assign=True)``:
-    assigning would swap the arena views out for ordinary tensors and quietly
+    assigning would swap the buffer views out for ordinary tensors and quietly
     demote every gather back to NCCL.
     """
     from torch.distributed.tensor import distribute_tensor
@@ -205,16 +205,16 @@ def main() -> None:
     _load_into_shards(model, state)
 
     # (1) placement: the block's shards are in a window, the head's are not.
-    from magi_compiler.symm_mem import lookup_shard, registered_arenas
+    from magi_compiler.symm_mem import lookup_shard, registered_buffers
 
     block_names = {n for n, _ in _named_shards(model) if n.startswith("block.")}
-    in_arena = [n for n, p in _named_shards(model) if lookup_shard(p._local_tensor.data_ptr()) is not None]
-    head_in_arena = [n for n in in_arena if not n.startswith("block.")]
-    arena_mib = sum(a.nbytes for a in registered_arenas()) / 2**20
-    placement_ok = (set(in_arena) == block_names) if ce else (in_arena == [])
+    in_buffer = [n for n, p in _named_shards(model) if lookup_shard(p._local_tensor.data_ptr()) is not None]
+    head_in_buffer = [n for n in in_buffer if not n.startswith("block.")]
+    buffer_mib = sum(a.nbytes for a in registered_buffers()) / 2**20
+    placement_ok = (set(in_buffer) == block_names) if ce else (in_buffer == [])
     log(
-        f"CHECK placement: {len(in_arena)}/{len(block_names)} block shards in {len(registered_arenas())} "
-        f"window(s) ({arena_mib:.0f} MiB), {len(head_in_arena)} stray -> {'ok' if placement_ok else 'WRONG'}"
+        f"CHECK placement: {len(in_buffer)}/{len(block_names)} block shards in {len(registered_buffers())} "
+        f"window(s) ({buffer_mib:.0f} MiB), {len(head_in_buffer)} stray -> {'ok' if placement_ok else 'WRONG'}"
     )
 
     # (2) + (3): compile, then run twice.  The second step is the one that
@@ -243,7 +243,7 @@ def main() -> None:
     log(
         f"\nCONFIG world={world} hidden={args.hidden} layers={args.n_layers} tokens={args.n_tokens} "
         f"transport={args.transport}\n"
-        f"MEMORY arena={arena_mib:.0f}MiB "
+        f"MEMORY buffer={buffer_mib:.0f}MiB "
         f"(one gathered layer = {args.hidden ** 2 * dtype.itemsize / 2**20:.0f}MiB)"
     )
 

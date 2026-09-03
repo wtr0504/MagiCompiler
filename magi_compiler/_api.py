@@ -224,9 +224,9 @@ def _magi_compile_class(
         _patch_cpu_offload_apply(cls, conf)
 
     if issubclass(cls, nn.Module) and conf.fsdp_config.transport == "copy_engine":
-        from magi_compiler.symm_mem import patch_symm_arena_apply
+        from magi_compiler.symm_mem import patch_symm_buffer_apply
 
-        patch_symm_arena_apply(cls)
+        patch_symm_buffer_apply(cls)
 
     old_init = cls.__init__
 
@@ -252,9 +252,9 @@ def _magi_compile_bound_method(
         return instance
 
     if conf.fsdp_config.transport == "copy_engine" and isinstance(instance, nn.Module):
-        from magi_compiler.symm_mem import migrate_to_arenas
+        from magi_compiler.symm_mem import migrate_to_buffers
 
-        migrate_to_arenas(instance)
+        migrate_to_buffers(instance)
 
     old_method = getattr(instance, method_name)
 

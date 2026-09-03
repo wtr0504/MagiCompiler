@@ -27,7 +27,7 @@ def _is_uneven_shard(node: fx.Node) -> bool:
     return bool(node.meta.get("magi_fsdp_uneven_shard"))
 
 
-def _input_is_arena_shard(node: fx.Node) -> bool:
+def _input_is_symm_shard(node: fx.Node) -> bool:
     """True when the gather input is ``to_local(placeholder/get_attr)`` with no intervening op."""
     if _is_uneven_shard(node):
         return False
@@ -38,16 +38,16 @@ def _input_is_arena_shard(node: fx.Node) -> bool:
     return isinstance(owner, fx.Node) and owner.op in ("placeholder", "get_attr")
 
 
-def _coalesced_inputs_are_arena_shards(node: fx.Node) -> bool:
+def _coalesced_inputs_are_symm_shards(node: fx.Node) -> bool:
     if _is_uneven_shard(node):
         return False
     locs = node.args[0] if node.args else None
     if not isinstance(locs, (list, tuple)) or not locs:
         return False
-    return all(isinstance(loc, fx.Node) and _input_is_arena_shard_from_local(loc) for loc in locs)
+    return all(isinstance(loc, fx.Node) and _input_is_symm_shard_from_local(loc) for loc in locs)
 
 
-def _input_is_arena_shard_from_local(src: fx.Node) -> bool:
+def _input_is_symm_shard_from_local(src: fx.Node) -> bool:
     if src.op != "call_method" or src.target != "to_local":
         return False
     owner = src.args[0] if src.args else None
@@ -66,13 +66,13 @@ def rewrite_weight_ag_to_copy_engine(graph: fx.GraphModule) -> int:
         if not node.meta.get("magi_fsdp_weight_ag"):
             continue
         if node.target is _ALL_GATHER:
-            if not _input_is_arena_shard(node):
+            if not _input_is_symm_shard(node):
                 skipped += 1
                 continue
             node.target = SYMM_ALL_GATHER
             rewritten += 1
         elif node.target is _ALL_GATHER_COALESCED:
-            if not _coalesced_inputs_are_arena_shards(node):
+            if not _coalesced_inputs_are_symm_shards(node):
                 skipped += 1
                 continue
             node.target = SYMM_ALL_GATHER_COALESCED

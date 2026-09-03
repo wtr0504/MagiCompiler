@@ -39,7 +39,7 @@ With ``--modes-only`` (>=2 ranks, gloo, no CUDA / no compile): drive
 the expected mode for each rung of the ladder (identical / slot / pinned / abort).
 
 With ``--copy-engine``: the same shape, but the gathers are
-``magi::symm_all_gather`` reading a symmetric arena.  Two things are checked that
+``magi::symm_all_gather`` reading a symmetric buffer.  Two things are checked that
 NCCL does not exercise.  First, recognition: the gather is a plain fallback
 kernel with an alias node between it and its wait, so the pass has to see through
 that or it silently plans nothing.  Second, slot safety: the gathers cycle
@@ -123,7 +123,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mismatch", action="store_true", help="rank1 compiles a structurally different graph")
     ap.add_argument("--modes-only", action="store_true", help="only self-check the mode ladder (gloo, no compile)")
-    ap.add_argument("--copy-engine", action="store_true", help="gather from a symmetric arena instead of NCCL")
+    ap.add_argument("--copy-engine", action="store_true", help="gather from a symmetric buffer instead of NCCL")
     args = ap.parse_args()
 
     if args.modes_only:
@@ -169,17 +169,17 @@ def main() -> None:
 
     ce_shards: list = []
     if args.copy_engine:
-        from magi_compiler.symm_mem import SymmArena, register_shard
+        from magi_compiler.symm_mem import SymmBuffer, register_shard
         from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER
 
-        arena = SymmArena(torch.bfloat16, torch.device("cuda", dev), grp)
+        buffer = SymmBuffer(torch.bfloat16, torch.device("cuda", dev), grp)
         for _ in range(N_CE_LAYERS):
-            arena.reserve(H * H)
-        arena.commit()
+            buffer.reserve(H * H)
+        buffer.commit()
         for i in range(N_CE_LAYERS):
-            s = arena.take((H, H))
+            s = buffer.take((H, H))
             s.normal_(0.0, H**-0.5).add_(0.01 * i)
-            register_shard(s, arena)
+            register_shard(s, buffer)
             ce_shards.append(s)
         # A peer read is only legal once that peer has written its shard.
         torch.cuda.synchronize()

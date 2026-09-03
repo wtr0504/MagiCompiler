@@ -39,7 +39,7 @@ def lower_and_bucket_full_graph(
     the byte cap in program order (see ``bucket_weight_all_gather_coalesced``).
     0 = no cap (one bucket per (group, dtype) run).
 
-    ``transport="copy_engine"`` buckets *first* (only arena-shard gathers, so a cast
+    ``transport="copy_engine"`` buckets *first* (only SymmBuffer-shard gathers, so a cast
     of the shard and an unevenly split weight stay out of the bucket), then retargets
     both the leftover singles and the coalesced launches at the copy-engine ops.  The
     wrapper still runs one gather per member; reorder just sees one comm node per
@@ -55,9 +55,9 @@ def lower_and_bucket_full_graph(
     bucket_mode = (bucket_mode or "none").lower()
     n = 0
     if bucket_mode == "coalesced":
-        from .symm_ag_rewrite import _input_is_arena_shard
+        from .symm_ag_rewrite import _input_is_symm_shard
 
-        eligible = _input_is_arena_shard if transport == "copy_engine" else None
+        eligible = _input_is_symm_shard if transport == "copy_engine" else None
         n = bucket_weight_all_gather_coalesced(graph, bucket_size_bytes=bucket_size_bytes, eligible=eligible)
         magi_logger.info("Whole-graph FSDP bucketing (%s): created %d buckets", bucket_mode, n)
     elif bucket_mode not in ("none", ""):
