@@ -705,20 +705,14 @@ def _ce_group_name() -> str:
 
 def _register_shards(shapes, dtype=torch.bfloat16):
     """Register ``shapes`` as real symmetric-memory shards, filled distinctly."""
-    from magi_compiler.symm_mem import SymmBuffer, register_shard
-
-    buffer = SymmBuffer(dtype, torch.device("cuda", 0), _ce_group_name())
-    for shape in shapes:
-        buffer.reserve(shape[0] * shape[1])
-    buffer.commit()
+    from magi_compiler.symm_mem import alloc_shard, publish
 
     shards = []
     for i, shape in enumerate(shapes):
-        s = buffer.take(shape)
+        s = alloc_shard(shape, dtype, torch.device("cuda", 0), _ce_group_name())
         s.fill_(i + 1)
-        register_shard(s, buffer)
         shards.append(s)
-    torch.cuda.synchronize()
+    publish()
     return shards
 
 

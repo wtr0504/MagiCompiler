@@ -267,11 +267,16 @@ class FSDPConfig(BaseModel):
     transport: Literal["nccl", "copy_engine"] = Field(
         "nccl",
         description=(
-            "How weight all-gathers move bytes. 'nccl': ring kernels on the SMs. "
-            "'copy_engine': weight shards are allocated in symmetric memory at model build time and "
-            "gathered by peer copy-engine reads -- zero SM occupancy and no per-step cross-rank barrier, "
-            "at a lower raw bandwidth. Requires all ranks of the FSDP mesh dim to be NVLink-connected "
-            "within one node, and static weights (inference)."
+            "Weight all-gather path. 'nccl': SM kernels. 'copy_engine': bind weights into "
+            "symmetric memory and gather with peer copy-engine reads (0 SM, no per-step barrier). "
+            "Needs NVLink on the FSDP mesh dim and static weights; unbound weights stay on NCCL."
+        ),
+    )
+    symm_min_shard_mib: int = Field(
+        0,
+        ge=0,
+        description=(
+            "Minimum local-shard MiB to bind for copy_engine. Smaller shards stay on NCCL. " "0 = bind every eligible weight."
         ),
     )
 

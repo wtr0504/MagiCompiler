@@ -14,17 +14,25 @@
 
 from __future__ import annotations
 
+from typing import Any, Sequence
+
 import torch.fx as fx
 
 from magi_compiler.utils import magi_logger
 
 from .bucket_all_gather import bucket_weight_all_gather_coalesced
+from .copy_engine import bind_weights_for_copy_engine, rewrite_weight_ag_to_copy_engine
+from .node_meta import is_ce_bound
 from .redistribute_lowering import lower_prim_redistribute_to_collectives
-from .symm_ag_rewrite import rewrite_weight_ag_to_copy_engine
 
 
 def lower_and_bucket_full_graph(
-    graph: fx.GraphModule, bucket_mode: str, bucket_size_bytes: int = 0, transport: str = "nccl"
+    graph: fx.GraphModule,
+    bucket_mode: str,
+    bucket_size_bytes: int = 0,
+    transport: str = "nccl",
+    example_inputs: Sequence[Any] | None = None,
+    min_shard_bytes: int = 0,
 ) -> int:
     """Lower SimpleFSDP weight redistribute -> explicit collectives, then
     optionally bucket them across the WHOLE graph (no subgraph partitioning).
@@ -39,26 +47,26 @@ def lower_and_bucket_full_graph(
     the byte cap in program order (see ``bucket_weight_all_gather_coalesced``).
     0 = no cap (one bucket per (group, dtype) run).
 
-    ``transport="copy_engine"`` buckets *first* (only SymmBuffer-shard gathers, so a cast
-    of the shard and an unevenly split weight stay out of the bucket), then retargets
-    both the leftover singles and the coalesced launches at the copy-engine ops.  The
-    wrapper still runs one gather per member; reorder just sees one comm node per
-    bucket.  Bucket membership therefore depends on the eligibility predicate, which
-    is why that predicate has to answer identically on every rank -- see
-    ``symm_ag_rewrite._is_uneven_shard``.
+    ``transport="copy_engine"`` wraps the bucketing in the two steps ``copy_engine``
+    owns: binding right after lowering, the retarget at the very end.  Bucketing
+    then keys off what binding served, so bound and unbound gathers are split into
+    separate buckets rather than the unbound ones being dropped from bucketing --
+    losing the copy engine must not also lose coalescing.  ``example_inputs`` and
+    ``min_shard_bytes`` are read only on this path.
 
     Returns the number of buckets created.
     """
     lowered = lower_prim_redistribute_to_collectives(graph)
     magi_logger.info("Whole-graph FSDP lowering: %d weight redistribute -> collectives", lowered)
 
+    if transport == "copy_engine":
+        bind_weights_for_copy_engine(graph, example_inputs, min_shard_bytes)
+
     bucket_mode = (bucket_mode or "none").lower()
     n = 0
     if bucket_mode == "coalesced":
-        from .symm_ag_rewrite import _input_is_symm_shard
-
-        eligible = _input_is_symm_shard if transport == "copy_engine" else None
-        n = bucket_weight_all_gather_coalesced(graph, bucket_size_bytes=bucket_size_bytes, eligible=eligible)
+        split_by = is_ce_bound if transport == "copy_engine" else None
+        n = bucket_weight_all_gather_coalesced(graph, bucket_size_bytes=bucket_size_bytes, split_by=split_by)
         magi_logger.info("Whole-graph FSDP bucketing (%s): created %d buckets", bucket_mode, n)
     elif bucket_mode not in ("none", ""):
         raise ValueError(f"Unknown bucket_mode={bucket_mode!r}; expected 'none' or 'coalesced'")

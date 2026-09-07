@@ -73,42 +73,28 @@ def _clean_state():
 
 
 def _symm_model(mesh, hidden: int = 64, n_layers: int = 3, dtype=torch.bfloat16):
-    """A meta-built, Shard(0)-sharded model materialized into a symmetric buffer,
-    exactly the shape step 1 produces."""
+    """A Shard(0)-sharded model whose weights have been bound into symmetric memory.
+
+    Bound through ``bind_parameters`` rather than a graph: what this file tests is
+    the operator, and the operator only cares that the shard it is handed is a
+    registered one.
+    """
     from torch.distributed.tensor import Shard, distribute_tensor
 
-    from magi_compiler.symm_mem import materialize_into_buffers
+    from magi_compiler.symm_mem import bind_parameters
 
     class Block(nn.Module):
         def __init__(self):
             super().__init__()
             self.layers = nn.ModuleList([nn.Linear(hidden, hidden, bias=False, dtype=dtype) for _ in range(n_layers)])
 
-    with torch.device("meta"):
+    with torch.device("cuda", 0):
         model = Block()
     for mod in model.modules():
         for name, p in list(mod.named_parameters(recurse=False)):
             mod.register_parameter(name, nn.Parameter(distribute_tensor(p, mesh, [Shard(0)])))
 
-    device = torch.device("cuda", 0)
-    from torch.distributed.tensor import DTensor
-
-    from magi_compiler.symm_mem.symm_buffer import _buffer_key, register_shard
-
-    buffers = materialize_into_buffers(model, device)
-    views: dict[int, torch.Tensor] = {}
-
-    def materialize(t):
-        if isinstance(t, DTensor):
-            buffer = buffers[_buffer_key(t)]
-            local = buffer.take(t._local_tensor.shape)
-            register_shard(local, buffer)
-            views[id(t)] = local
-            return DTensor.from_local(local, t.device_mesh, t.placements, run_check=False)
-        return torch.empty_like(t, device=device)
-
-    materialize.__qualname__ = "Module.to_empty.<locals>.<lambda>"
-    nn.Module._apply(model, materialize)
+    assert bind_parameters(list(model.parameters())) == n_layers
 
     shards = [p._local_tensor for p in model.parameters()]
     for i, s in enumerate(shards):

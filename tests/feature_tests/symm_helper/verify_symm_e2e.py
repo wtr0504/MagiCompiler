@@ -204,7 +204,19 @@ def main() -> None:
     model.to_empty(device=device)
     _load_into_shards(model, state)
 
-    # (1) placement: the block's shards are in a window, the head's are not.
+    # (1) compile, then run twice.  The second step is the one that would read a
+    # stale destination if the wait were missing.
+    with torch.no_grad():
+        out1 = model(x)
+        torch.cuda.synchronize()
+        out2 = model(x)
+        torch.cuda.synchronize()
+
+    _lb.rewrite_weight_ag_to_copy_engine = orig_rewrite
+
+    # (2) placement: the block's shards are in a window, the head's are not.
+    # Checked after the first forward, not before it: the weights move during
+    # compilation, off the graph Dynamo captured.
     from magi_compiler.symm_mem import lookup_shard, registered_buffers
 
     block_names = {n for n, _ in _named_shards(model) if n.startswith("block.")}
@@ -216,16 +228,6 @@ def main() -> None:
         f"CHECK placement: {len(in_buffer)}/{len(block_names)} block shards in {len(registered_buffers())} "
         f"window(s) ({buffer_mib:.0f} MiB), {len(head_in_buffer)} stray -> {'ok' if placement_ok else 'WRONG'}"
     )
-
-    # (2) + (3): compile, then run twice.  The second step is the one that
-    # would read a stale destination if the wait were missing.
-    with torch.no_grad():
-        out1 = model(x)
-        torch.cuda.synchronize()
-        out2 = model(x)
-        torch.cuda.synchronize()
-
-    _lb.rewrite_weight_ag_to_copy_engine = orig_rewrite
 
     expect_rewrites = args.n_layers if ce else 0
     rewrite_ok = n_rewritten == expect_rewrites

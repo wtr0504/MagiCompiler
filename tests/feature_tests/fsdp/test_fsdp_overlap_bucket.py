@@ -56,6 +56,8 @@ def _build_ag_graph(specs, world=2, group="grp0"):
     how a trailing rank of an uneven ``Shard(0)`` looks: fewer rows locally, same
     gathered size.  That is the one thing a bucketing decision must not depend on.
     """
+    from magi_compiler.passes.fsdp_overlap.node_meta import mark_weight_ag
+
     g = fx.Graph()
     locs = []
     for i, s in enumerate(specs):
@@ -75,7 +77,7 @@ def _build_ag_graph(specs, world=2, group="grp0"):
         gathered = torch.empty(chunk * world, *rest, dtype=s["dtype"], device="meta")
         ag = g.call_function(_AG, (loc, world, group))
         ag.meta["example_value"] = gathered
-        ag.meta["magi_fsdp_weight_ag"] = True
+        mark_weight_ag(ag, uneven=False)
         w = g.call_function(_WAIT, (ag,))
         w.meta["example_value"] = gathered
         outs.append(w)

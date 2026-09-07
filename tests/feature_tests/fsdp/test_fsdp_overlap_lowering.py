@@ -141,7 +141,9 @@ def test_lowering_rewrites_shard0_weight(dist_1rank):
     # the prims are gone, replaced by explicit collectives
     assert prim_redistribute not in targets and prim_to_local not in targets
     # the gather is tagged so the bucketing pass can find it
-    tagged = [x for x in gm.graph.nodes if x.meta.get("magi_fsdp_weight_ag")]
+    from magi_compiler.passes.fsdp_overlap import is_weight_ag
+
+    tagged = [x for x in gm.graph.nodes if is_weight_ag(x)]
     assert len(tagged) == 1
 
 
@@ -161,7 +163,7 @@ def test_lowering_skips_non_weight_input(dist_1rank):
 @requires_cuda
 def test_lowering_rewrites_method_shaped_redistribute(dist_1rank):
     """The 2.12+ shape must lower exactly like the prim one, marked gather included."""
-    from magi_compiler.passes.fsdp_overlap import lower_prim_redistribute_to_collectives
+    from magi_compiler.passes.fsdp_overlap import is_weight_ag, lower_prim_redistribute_to_collectives
 
     gm = _build_method_redistribute_graph(dist_1rank, "model_fc1_weight_parameter")
     assert lower_prim_redistribute_to_collectives(gm) == 1
@@ -170,7 +172,7 @@ def test_lowering_rewrites_method_shaped_redistribute(dist_1rank):
     assert _AG in targets and _WAIT in targets
     methods = [n.target for n in gm.graph.nodes if n.op == "call_method"]
     assert "redistribute" not in methods  # consumed; only the to_local of the shard is left
-    assert len([x for x in gm.graph.nodes if x.meta.get("magi_fsdp_weight_ag")]) == 1
+    assert len([x for x in gm.graph.nodes if is_weight_ag(x)]) == 1
 
 
 @requires_cuda
@@ -199,14 +201,14 @@ def test_lowering_records_shard_evenness_on_the_gather(dist_1rank):
     same on every rank -- unlike the local shard length, which is what makes the pad
     appear on the trailing ranks only.
     """
-    from magi_compiler.passes.fsdp_overlap import lower_prim_redistribute_to_collectives
+    from magi_compiler.passes.fsdp_overlap import UNEVEN_SHARD, lower_prim_redistribute_to_collectives
 
     gm = _build_redistribute_graph(dist_1rank, "layer_weight", rows=8)
     assert lower_prim_redistribute_to_collectives(gm) == 1
 
     ag = [n for n in gm.graph.nodes if n.op == "call_function" and n.target is _AG]
-    assert "magi_fsdp_uneven_shard" in ag[0].meta
-    assert ag[0].meta["magi_fsdp_uneven_shard"] is False  # 8 rows over a 1-rank mesh
+    assert UNEVEN_SHARD in ag[0].meta
+    assert ag[0].meta[UNEVEN_SHARD] is False  # 8 rows over a 1-rank mesh
 
 
 @requires_cuda

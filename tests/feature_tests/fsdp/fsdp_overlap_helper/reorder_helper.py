@@ -169,21 +169,15 @@ def main() -> None:
 
     ce_shards: list = []
     if args.copy_engine:
-        from magi_compiler.symm_mem import SymmBuffer, register_shard
+        from magi_compiler.symm_mem import alloc_shard, publish
         from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER
 
-        buffer = SymmBuffer(torch.bfloat16, torch.device("cuda", dev), grp)
-        for _ in range(N_CE_LAYERS):
-            buffer.reserve(H * H)
-        buffer.commit()
         for i in range(N_CE_LAYERS):
-            s = buffer.take((H, H))
+            s = alloc_shard((H, H), torch.bfloat16, torch.device("cuda", dev), grp)
             s.normal_(0.0, H**-0.5).add_(0.01 * i)
-            register_shard(s, buffer)
             ce_shards.append(s)
         # A peer read is only legal once that peer has written its shard.
-        torch.cuda.synchronize()
-        dist.barrier()
+        publish()
 
         def fn(x, w0, shards):  # noqa: F811 - deliberately replaces the NCCL variant
             y = (x @ w0).relu()

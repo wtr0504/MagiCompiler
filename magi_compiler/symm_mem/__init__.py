@@ -19,16 +19,15 @@
 whether the copy-engine transport is available.  Import that module by path.
 """
 
+from .bind import bind_graph_weights, bind_parameters
 from .symm_buffer import (
     ShardEntry,
     SymmBuffer,
-    barrier_after_load,
+    alloc_shard,
     find_shard_by_layout,
+    group_name_of,
     lookup_shard,
-    materialize_into_buffers,
-    migrate_to_buffers,
-    patch_symm_buffer_apply,
-    register_shard,
+    publish,
     registered_buffers,
     reset_registry,
 )
@@ -36,13 +35,13 @@ from .symm_buffer import (
 __all__ = [
     "ShardEntry",
     "SymmBuffer",
-    "barrier_after_load",
+    "alloc_shard",
+    "bind_graph_weights",
+    "bind_parameters",
     "find_shard_by_layout",
+    "group_name_of",
     "lookup_shard",
-    "materialize_into_buffers",
-    "migrate_to_buffers",
-    "patch_symm_buffer_apply",
-    "register_shard",
+    "publish",
     "registered_buffers",
     "reset_registry",
 ]
