@@ -486,13 +486,13 @@ def test_bound_weights_are_bucketed_and_retargeted(mesh_1rank):
     """The pipeline end to end: bind, then bucket only what bound, then retarget.
     Binding before bucketing is what keeps a bucket homogeneous."""
     from magi_compiler.passes.fsdp_overlap import lower_and_bucket_full_graph
-    from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER_COALESCED
+    from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER_COALESCED
 
     gm, examples = _graph([_param(mesh_1rank) for _ in range(4)])
     n = lower_and_bucket_full_graph(gm, "coalesced", bucket_size_bytes=0, transport="copy_engine", example_inputs=examples)
 
     assert n == 1
-    coalesced = [x for x in gm.graph.nodes if x.target is SYMM_ALL_GATHER_COALESCED]
+    coalesced = [x for x in gm.graph.nodes if x.target is CE_ALL_GATHER_COALESCED]
     assert len(coalesced) == 1
     assert len(coalesced[0].args[0]) == 4
 
@@ -504,7 +504,7 @@ def test_an_unbound_weight_keeps_its_neighbours_on_the_copy_engine(mesh_1rank):
     across the whole model."""
     from magi_compiler.passes.fsdp_overlap import lower_and_bucket_full_graph
     from magi_compiler.passes.fsdp_overlap.node_meta import UNEVEN_SHARD
-    from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER_COALESCED
+    from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER_COALESCED
 
     gm, examples = _graph([_param(mesh_1rank) for _ in range(4)])
     gathers = [n for n in gm.graph.nodes if n.target is _AG]
@@ -512,7 +512,7 @@ def test_an_unbound_weight_keeps_its_neighbours_on_the_copy_engine(mesh_1rank):
 
     lower_and_bucket_full_graph(gm, "coalesced", bucket_size_bytes=0, transport="copy_engine", example_inputs=examples)
 
-    coalesced = [n for n in gm.graph.nodes if n.target is SYMM_ALL_GATHER_COALESCED]
+    coalesced = [n for n in gm.graph.nodes if n.target is CE_ALL_GATHER_COALESCED]
     assert len(coalesced) == 1
     assert len(coalesced[0].args[0]) == 3  # the three bound weights, in one bucket
     assert len([n for n in gm.graph.nodes if n.target is _AG]) == 1  # the uneven one, on NCCL
@@ -529,7 +529,7 @@ def test_unbound_weights_are_still_bucketed_as_nccl(mesh_1rank):
     """
     from magi_compiler.passes.fsdp_overlap import lower_and_bucket_full_graph
     from magi_compiler.passes.fsdp_overlap.node_meta import UNEVEN_SHARD
-    from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER_COALESCED
+    from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER_COALESCED
 
     _AG_COALESCED = torch.ops._c10d_functional.all_gather_into_tensor_coalesced.default
 
@@ -542,7 +542,7 @@ def test_unbound_weights_are_still_bucketed_as_nccl(mesh_1rank):
         == 2
     )
 
-    (ce,) = [n for n in gm.graph.nodes if n.target is SYMM_ALL_GATHER_COALESCED]
+    (ce,) = [n for n in gm.graph.nodes if n.target is CE_ALL_GATHER_COALESCED]
     (nccl,) = [n for n in gm.graph.nodes if n.target is _AG_COALESCED]
     assert len(ce.args[0]) == 2
     assert len(nccl.args[0]) == 2

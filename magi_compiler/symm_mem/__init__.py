@@ -15,7 +15,7 @@
 """Symmetric-memory weight storage and the copy-engine all-gather built on it.
 
 ``all_gather`` is deliberately not re-exported here: importing it defines the
-``magi::symm_all_gather`` ops, and callers use the import itself as the probe for
+``magi::ce_all_gather`` ops, and callers use the import itself as the probe for
 whether the copy-engine transport is available.  Import that module by path.
 """
 

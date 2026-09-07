@@ -119,13 +119,13 @@ def _example_inputs(gm) -> list[object]:
 
 def _gather_targets(gm) -> tuple[dict[str, int], list[tuple[str, int]]]:
     """Which transport each gather ended up on, and the size of each coalesced launch."""
-    from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER, SYMM_ALL_GATHER_COALESCED
+    from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER, CE_ALL_GATHER_COALESCED
 
     names = {
         _NCCL_AG: "nccl",
         _NCCL_AG_COALESCED: "nccl_coalesced",
-        SYMM_ALL_GATHER: "symm",
-        SYMM_ALL_GATHER_COALESCED: "symm_coalesced",
+        CE_ALL_GATHER: "ce",
+        CE_ALL_GATHER_COALESCED: "ce_coalesced",
     }
     counts: Counter[str] = Counter()
     sizes: list[tuple[str, int]] = []
@@ -225,7 +225,7 @@ def _check_mixed(mesh, *, even_rows: int, uneven_rows: int, cols: int, say) -> b
     targets, sizes = _gather_targets(gm)
     targets = dict(sorted(targets.items()))
     sizes = sorted(sizes)
-    expected = ({"nccl_coalesced": 1, "symm_coalesced": 1}, [("nccl_coalesced", 2), ("symm_coalesced", 2)])
+    expected = ({"ce_coalesced": 1, "nccl_coalesced": 1}, [("ce_coalesced", 2), ("nccl_coalesced", 2)])
     ok = _agree((targets, sizes)) and (targets, sizes) == expected
     say(f"UNEVEN_MIXED agree={ok} targets={targets} sizes={sizes}")
     return ok

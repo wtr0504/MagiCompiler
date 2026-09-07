@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Mechanics of ``magi::symm_all_gather`` (step 2 of the landing order).
+"""Mechanics of ``magi::ce_all_gather`` (step 2 of the landing order).
 
 Single rank, so the copies are device-to-self and the values are trivially
 checkable -- what is under test here is the plumbing that is easy to get subtly
@@ -23,7 +23,7 @@ garbage.
 
 The transport itself (peer reads, overlap, ordering under load) needs several
 NVLink-connected ranks and lives in
-``example/inference/fsdp_overlap/verify_symm_ag_op.py``.
+``example/inference/fsdp_overlap/verify_ce_ag_op.py``.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ def mesh_1rank():
 
 @pytest.fixture(autouse=True)
 def _clean_state():
-    # Importing the module is what defines ``magi::symm_all_gather``.  Nothing
+    # Importing the module is what defines ``magi::ce_all_gather``.  Nothing
     # else here pulls it in, so without this the ops only exist when some other
     # test in the same session happened to import them first.
     import magi_compiler.symm_mem.all_gather  # noqa: F401
@@ -108,7 +108,7 @@ def test_gather_matches_nccl_bitwise(mesh_1rank):
     _, shards = _symm_model(mesh_1rank)
 
     for shard in shards:
-        got = _WAIT(torch.ops.magi.symm_all_gather(shard, 1, ""))
+        got = _WAIT(torch.ops.magi.ce_all_gather(shard, 1, ""))
         ref = torch.empty_like(got)
         torch.distributed.all_gather_into_tensor(ref, shard)
         torch.cuda.synchronize()
@@ -119,11 +119,11 @@ def test_gather_matches_nccl_bitwise(mesh_1rank):
 def test_coalesced_wrap_matches_per_member_gather(mesh_1rank):
     """The thin wrap is per-member dests; each wait must match a single gather."""
     _, shards = _symm_model(mesh_1rank)
-    outs = torch.ops.magi.symm_all_gather_coalesced(list(shards), 1, "")
+    outs = torch.ops.magi.ce_all_gather_coalesced(list(shards), 1, "")
     assert len(outs) == len(shards)
     for out, shard in zip(outs, shards):
         got = _WAIT(out)
-        ref = _WAIT(torch.ops.magi.symm_all_gather(shard, 1, ""))
+        ref = _WAIT(torch.ops.magi.ce_all_gather(shard, 1, ""))
         assert torch.equal(got, ref)
 
 
@@ -133,7 +133,7 @@ def test_wait_tensor_picks_up_the_registered_event(mesh_1rank):
     _, shards = _symm_model(mesh_1rank)
     shard = shards[0]
 
-    out = _WAIT(torch.ops.magi.symm_all_gather(shard, 1, ""))
+    out = _WAIT(torch.ops.magi.ce_all_gather(shard, 1, ""))
     # No synchronize: the value must be correct because of the wait alone.
     assert torch.equal(out, shard.expand_as(out)), "wait_tensor did not order the copies"
 
@@ -143,8 +143,8 @@ def test_each_gather_returns_a_fresh_buffer(mesh_1rank):
     """Two live gathers must land in different buffers, or a prefetched weight
     would be overwritten before its consumer ran."""
     _, shards = _symm_model(mesh_1rank)
-    a = torch.ops.magi.symm_all_gather(shards[0], 1, "")
-    b = torch.ops.magi.symm_all_gather(shards[1], 1, "")
+    a = torch.ops.magi.ce_all_gather(shards[0], 1, "")
+    b = torch.ops.magi.ce_all_gather(shards[1], 1, "")
     _WAIT(a)
     _WAIT(b)
     torch.cuda.synchronize()
@@ -159,14 +159,14 @@ def test_unregistered_shard_is_rejected(mesh_1rank):
     read whatever happens to be at that address.  Fail instead."""
     ordinary = torch.ones(8, 4, device="cuda", dtype=torch.bfloat16)
     with pytest.raises(RuntimeError, match="not a registered symmetric-memory shard"):
-        torch.ops.magi.symm_all_gather(ordinary, 1, "")
+        torch.ops.magi.ce_all_gather(ordinary, 1, "")
 
 
 @requires_cuda
 def test_group_size_mismatch_is_rejected(mesh_1rank):
     _, shards = _symm_model(mesh_1rank)
     with pytest.raises(RuntimeError, match="peers but the gather asks for"):
-        torch.ops.magi.symm_all_gather(shards[0], 4, "")
+        torch.ops.magi.ce_all_gather(shards[0], 4, "")
 
 
 @requires_cuda
@@ -177,14 +177,14 @@ def test_coalesced_validates_every_member_before_allocating(mesh_1rank):
     _, shards = _symm_model(mesh_1rank)
     ordinary = torch.ones(8, 4, device="cuda", dtype=torch.bfloat16)
     with pytest.raises(RuntimeError, match="not a registered symmetric-memory shard"):
-        torch.ops.magi.symm_all_gather_coalesced([shards[0], ordinary], 1, "")
+        torch.ops.magi.ce_all_gather_coalesced([shards[0], ordinary], 1, "")
 
 
 @requires_cuda
 def test_meta_kernel_shape(mesh_1rank):
     with torch.device("meta"):
         local = torch.empty(4, 6, dtype=torch.bfloat16)
-    out = torch.ops.magi.symm_all_gather(local, 8, "")
+    out = torch.ops.magi.ce_all_gather(local, 8, "")
     assert out.shape == (32, 6) and out.is_meta
 
 
@@ -194,7 +194,7 @@ def test_coalesced_meta_kernel_shapes(mesh_1rank):
     broadcast one shape across the list -- Dynamo would trace the wrong dest."""
     with torch.device("meta"):
         shards = [torch.empty(4, 6, dtype=torch.bfloat16), torch.empty(2, 6, dtype=torch.bfloat16)]
-    outs = torch.ops.magi.symm_all_gather_coalesced(shards, 8, "")
+    outs = torch.ops.magi.ce_all_gather_coalesced(shards, 8, "")
     assert [tuple(o.shape) for o in outs] == [(32, 6), (16, 6)]
     assert all(o.is_meta for o in outs)
 
@@ -258,11 +258,11 @@ def test_per_peer_fallback_matches_the_batched_path(mesh_1rank, monkeypatch):
     from magi_compiler.symm_mem import all_gather as ag_mod
 
     _, shards = _symm_model(mesh_1rank)
-    batched = _WAIT(torch.ops.magi.symm_all_gather(shards[0], 1, ""))
+    batched = _WAIT(torch.ops.magi.ce_all_gather(shards[0], 1, ""))
     torch.cuda.synchronize()
 
     monkeypatch.setattr(ag_mod, "_batcher", lambda: None)
-    fallback = _WAIT(torch.ops.magi.symm_all_gather(shards[0], 1, ""))
+    fallback = _WAIT(torch.ops.magi.ce_all_gather(shards[0], 1, ""))
     torch.cuda.synchronize()
 
     assert torch.equal(fallback, batched)

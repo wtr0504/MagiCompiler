@@ -53,19 +53,19 @@ _AG = torch.ops._c10d_functional.all_gather_into_tensor.default
 _AG_COALESCED = torch.ops._c10d_functional.all_gather_into_tensor_coalesced.default
 
 
-def _symm_ag_ops():
+def _ce_ag_ops():
     """Copy-engine gather ops, imported lazily so this pass stays importable
     without a CUDA build."""
     try:
-        from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER, SYMM_ALL_GATHER_COALESCED
+        from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER, CE_ALL_GATHER_COALESCED
 
-        return tuple(op for op in (SYMM_ALL_GATHER, SYMM_ALL_GATHER_COALESCED) if op is not None)
+        return tuple(op for op in (CE_ALL_GATHER, CE_ALL_GATHER_COALESCED) if op is not None)
     except Exception:  # noqa: BLE001
         return ()
 
 
-_SYMM_AG_OPS = _symm_ag_ops()
-_WEIGHT_AG_OPS = tuple(op for op in (_AG, _AG_COALESCED, *_SYMM_AG_OPS) if op is not None)
+_CE_AG_OPS = _ce_ag_ops()
+_WEIGHT_AG_OPS = tuple(op for op in (_AG, _AG_COALESCED, *_CE_AG_OPS) if op is not None)
 
 # Default extra headroom (ns) added to each collective's runtime when sizing the
 # compute window, absorbing estimator error + kernel-launch latency so the wait
@@ -73,24 +73,24 @@ _WEIGHT_AG_OPS = tuple(op for op in (_AG, _AG_COALESCED, *_SYMM_AG_OPS) if op is
 _DEFAULT_WINDOW_MARGIN_NS = 5_000.0
 
 
-def _is_symm_ag_ir(node) -> bool:
+def _is_ce_ag_ir(node) -> bool:
     """
-    ``magi::symm_all_gather`` lowers to an ordinary FallbackKernel, so
+    ``magi::ce_all_gather`` lowers to an ordinary FallbackKernel, so
     Inductor's ``is_collective`` does not recognize it.
     """
-    return getattr(node, "op_overload", None) in _SYMM_AG_OPS
+    return getattr(node, "op_overload", None) in _CE_AG_OPS
 
 
-def _is_symm_ag_coalesced(node) -> bool:
+def _is_ce_ag_coalesced(node) -> bool:
     try:
-        from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER_COALESCED
+        from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER_COALESCED
     except Exception:  # noqa: BLE001
         return False
-    return SYMM_ALL_GATHER_COALESCED is not None and getattr(node, "op_overload", None) is SYMM_ALL_GATHER_COALESCED
+    return CE_ALL_GATHER_COALESCED is not None and getattr(node, "op_overload", None) is CE_ALL_GATHER_COALESCED
 
 
 def _is_gather_ir(node) -> bool:
-    return node is not None and (is_collective(node) or _is_symm_ag_ir(node))
+    return node is not None and (is_collective(node) or _is_ce_ag_ir(node))
 
 
 def _leaf_collective_node(snode: BaseSchedulerNode):
@@ -542,18 +542,18 @@ class FsdpOverlapReorder:
         group = [launch]
         node = _leaf_collective_node(launch)
         produced = set(launch.get_buffer_names())
-        if node is not None and (getattr(node, "op_overload", None) is _AG_COALESCED or _is_symm_ag_coalesced(node)):
+        if node is not None and (getattr(node, "op_overload", None) is _AG_COALESCED or _is_ce_ag_coalesced(node)):
             for s in order:
                 if _is_multi_output(s) and any((not _is_fake_dep(d)) and d.name in produced for d in s.unmet_dependencies):
                     group.append(s)
-            if _is_symm_ag_coalesced(node):
+            if _is_ce_ag_coalesced(node):
                 for s in order:
                     if s is launch or s in group or contains_wait(s) or not self._is_transparent(s):
                         continue
                     deps = [d for d in s.unmet_dependencies if not _is_fake_dep(d)]
                     if deps and all(d.name in produced for d in deps):
                         group.append(s)
-        elif _is_symm_ag_ir(node):
+        elif _is_ce_ag_ir(node):
             for s in order:
                 if s is launch or contains_wait(s) or not self._is_transparent(s):
                     continue

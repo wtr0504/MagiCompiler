@@ -29,7 +29,7 @@ and the reorder pass hoists them.  Checked at the end:
 
   1. **Placement** -- every block shard lives in a symmetric window, and the
      head, outside the decorated block, does not.
-  2. **Rewrite** -- the gathers really became ``magi::symm_all_gather``.  A pass
+  2. **Rewrite** -- the gathers really became ``magi::ce_all_gather``.  A pass
      that silently no-ops leaves a correct, NCCL-transported model behind, so
      correctness alone cannot detect it.
   3. **Numerics** -- output matches an unsharded eager model holding the same
@@ -231,9 +231,7 @@ def main() -> None:
 
     expect_rewrites = args.n_layers if ce else 0
     rewrite_ok = n_rewritten == expect_rewrites
-    log(
-        f"CHECK rewrite: {n_rewritten}/{expect_rewrites} gathers on magi::symm_all_gather -> {'ok' if rewrite_ok else 'WRONG'}"
-    )
+    log(f"CHECK rewrite: {n_rewritten}/{expect_rewrites} gathers on magi::ce_all_gather -> {'ok' if rewrite_ok else 'WRONG'}")
 
     def rel(a, b):
         return ((a.float() - b.float()).norm() / (b.float().norm() + 1e-6)).item()

@@ -343,23 +343,23 @@ def _collective_spec(node):
     return op, group_name, group_size, specs
 
 
-def _symm_ag_ops():
+def _ce_ag_ops():
     """Copy-engine gather ops, or empty when the runtime is unavailable."""
     try:
-        from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER, SYMM_ALL_GATHER_COALESCED
+        from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER, CE_ALL_GATHER_COALESCED
 
-        return tuple(op for op in (SYMM_ALL_GATHER, SYMM_ALL_GATHER_COALESCED) if op is not None)
+        return tuple(op for op in (CE_ALL_GATHER, CE_ALL_GATHER_COALESCED) if op is not None)
     except Exception:  # noqa: BLE001
         return ()
 
 
-def _leaf_symm_ag(snode: BaseSchedulerNode):
+def _leaf_ce_ag(snode: BaseSchedulerNode):
     """The copy-engine gather IR node inside ``snode``, or None.
 
     It is an ordinary FallbackKernel, not a ``_CollectiveKernel``, so none of
     Inductor's collective predicates see it.
     """
-    ops = _symm_ag_ops()
+    ops = _ce_ag_ops()
     if not ops:
         return None
     for n in (getattr(snode, "node", None), *(getattr(c, "node", None) for c in getattr(snode, "snodes", []) or [])):
@@ -368,15 +368,15 @@ def _leaf_symm_ag(snode: BaseSchedulerNode):
     return None
 
 
-def _is_symm_ag_coalesced_ir(node) -> bool:
+def _is_ce_ag_coalesced_ir(node) -> bool:
     try:
-        from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER_COALESCED
+        from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER_COALESCED
     except Exception:  # noqa: BLE001
         return False
-    return SYMM_ALL_GATHER_COALESCED is not None and getattr(node, "op_overload", None) is SYMM_ALL_GATHER_COALESCED
+    return CE_ALL_GATHER_COALESCED is not None and getattr(node, "op_overload", None) is CE_ALL_GATHER_COALESCED
 
 
-def _symm_ag_spec(node):
+def _ce_ag_spec(node):
     """(shapes, dtype, group_size, group_name). Use ``constant_args``; ``get_origin_node()`` is unset and would cost 0."""
     args = getattr(node, "constant_args", None)
     if not args or len(args) < 2:
@@ -389,7 +389,7 @@ def _symm_ag_spec(node):
     return shapes, ins[0].layout.dtype, int(group_size), str(group_name)
 
 
-def _symm_ag_launch_wait(snode: BaseSchedulerNode):
+def _ce_ag_launch_wait(snode: BaseSchedulerNode):
     """``(launch, wait)`` replaying a copy-engine gather, or None.
 
     Split in two rather than one fused closure so the cost model can time
@@ -397,8 +397,8 @@ def _symm_ag_launch_wait(snode: BaseSchedulerNode):
     """
     from magi_compiler.symm_mem import find_shard_by_layout
 
-    node = _leaf_symm_ag(snode)
-    spec = _symm_ag_spec(node) if node is not None else None
+    node = _leaf_ce_ag(snode)
+    spec = _ce_ag_spec(node) if node is not None else None
     if spec is None:
         return None
     shapes, dtype, group_size, group_name = spec
@@ -411,33 +411,33 @@ def _symm_ag_launch_wait(snode: BaseSchedulerNode):
             dtype,
         )
         return None
-    from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER, SYMM_ALL_GATHER_COALESCED
+    from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER, CE_ALL_GATHER_COALESCED
 
-    if _is_symm_ag_coalesced_ir(node):
-        op = SYMM_ALL_GATHER_COALESCED
+    if _is_ce_ag_coalesced_ir(node):
+        op = CE_ALL_GATHER_COALESCED
         return (lambda: op(shards, group_size, group_name)), lambda outs: [_WAIT(o) for o in outs]
-    return (lambda: SYMM_ALL_GATHER(shards[0], group_size, group_name)), _WAIT
+    return (lambda: CE_ALL_GATHER(shards[0], group_size, group_name)), _WAIT
 
 
-def _measure_symm_ag(snode: BaseSchedulerNode) -> float:
+def _measure_ce_ag(snode: BaseSchedulerNode) -> float:
     """Time ``wait(launch())``. Launch-only is ~3us CPU issue; copies run on a side stream."""
-    pair = _symm_ag_launch_wait(snode)
+    pair = _ce_ag_launch_wait(snode)
     if pair is None:
         return 0.0
     launch, wait = pair
     return _time_fixed(lambda: wait(launch()))
 
 
-def _symm_ag_label(snode: BaseSchedulerNode) -> str:
-    node = _leaf_symm_ag(snode)
-    spec = _symm_ag_spec(node) if node is not None else None
+def _ce_ag_label(snode: BaseSchedulerNode) -> str:
+    node = _leaf_ce_ag(snode)
+    spec = _ce_ag_spec(node) if node is not None else None
     if spec is None:
         return _snode_label(snode)
     shapes, _dtype, group_size, _gn = spec
     shape0 = "x".join(str(x) for x in shapes[0])
     if len(shapes) > 1:
-        return f"symm_all_gather_coalesced(ws={group_size},n={len(shapes)},{shape0})"
-    return f"symm_all_gather(ws={group_size},{shape0})"
+        return f"ce_all_gather_coalesced(ws={group_size},n={len(shapes)},{shape0})"
+    return f"ce_all_gather(ws={group_size},{shape0})"
 
 
 def _collective_label(snode: BaseSchedulerNode) -> str:
@@ -605,8 +605,8 @@ class ProfilingRuntimeEstimator:
         """Lockstep-safe single measurement (fixed iters for anything containing a
         collective); never raises -- falls back to the analytical estimate."""
         try:
-            if _leaf_symm_ag(snode) is not None:
-                return _measure_symm_ag(snode)
+            if _leaf_ce_ag(snode) is not None:
+                return _measure_ce_ag(snode)
             if contains_collective(snode):
                 return _measure_collective_op(snode)
             if isinstance(snode, ExternKernelSchedulerNode):
@@ -647,24 +647,24 @@ class ProfilingRuntimeEstimator:
         if _is_multi_output_unpack(snode):
             return 0.0
 
-        if _leaf_symm_ag(snode) is not None:
-            node = _leaf_symm_ag(snode)
-            spec = _symm_ag_spec(node)
+        if _leaf_ce_ag(snode) is not None:
+            node = _leaf_ce_ag(snode)
+            spec = _ce_ag_spec(node)
             if spec is None:
                 return _safe_analytical(snode)
             shapes, dtype, group_size, _gn = spec
-            ckey = ("symm_ag", group_size, shapes, str(dtype))
+            ckey = ("ce_ag", group_size, shapes, str(dtype))
             entry = self._table.get(ckey)
             if entry is not None:
                 entry.reuse_count += 1
                 self.n_cache_hits += 1
                 return entry.ns
             ns = _safe_analytical(snode)
-            self._table[ckey] = ProfileEntry(ns=ns, kind="symm_ag", label=_symm_ag_label(snode), measured=False)
+            self._table[ckey] = ProfileEntry(ns=ns, kind="ce_ag", label=_ce_ag_label(snode), measured=False)
             if self._sync_across_ranks:
                 self._key_snode[ckey] = snode
             else:
-                ns = _measure_symm_ag(snode)
+                ns = _measure_ce_ag(snode)
                 self._table[ckey].ns = ns
                 self._table[ckey].measured = True
                 self.n_measured += 1

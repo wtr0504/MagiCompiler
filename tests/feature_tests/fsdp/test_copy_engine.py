@@ -65,9 +65,9 @@ def mesh_1rank():
 
 
 def _symm_op():
-    from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER
+    from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER
 
-    return SYMM_ALL_GATHER
+    return CE_ALL_GATHER
 
 
 def _graph_with_gathers(
@@ -292,7 +292,7 @@ def test_a_bucket_of_bound_gathers_is_retargeted(mesh_1rank):
     """Bucketing runs after binding, so the coalesced node it builds has to inherit
     the mark from its members or the whole bucket falls back."""
     from magi_compiler.passes.fsdp_overlap import bucket_weight_all_gather_coalesced, rewrite_weight_ag_to_copy_engine
-    from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER_COALESCED
+    from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER_COALESCED
 
     gm = _graph_with_gathers(mesh_1rank, 4)
     _pretend_bound(gm)
@@ -300,7 +300,7 @@ def test_a_bucket_of_bound_gathers_is_retargeted(mesh_1rank):
     assert rewrite_weight_ag_to_copy_engine(gm) == 1
 
     assert not _gathers(gm, _AG_COALESCED)
-    assert len(_gathers(gm, SYMM_ALL_GATHER_COALESCED)) == 1
+    assert len(_gathers(gm, CE_ALL_GATHER_COALESCED)) == 1
     assert len(_gathers(gm, _WAIT)) == 4
 
 
@@ -311,7 +311,7 @@ def test_a_bucket_is_all_or_nothing(mesh_1rank):
     rather than being gathered from an address with no peers."""
     from magi_compiler.passes.fsdp_overlap import bucket_weight_all_gather_coalesced, rewrite_weight_ag_to_copy_engine
     from magi_compiler.passes.fsdp_overlap.node_meta import CE_BOUND
-    from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER_COALESCED
+    from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER_COALESCED
 
     gm = _graph_with_gathers(mesh_1rank, 3)
     _pretend_bound(gm)
@@ -322,7 +322,7 @@ def test_a_bucket_is_all_or_nothing(mesh_1rank):
     assert bucket_weight_all_gather_coalesced(gm, bucket_size_bytes=0) == 1
     assert rewrite_weight_ag_to_copy_engine(gm) == 0
     assert len(_gathers(gm, _AG_COALESCED)) == 1
-    assert not _gathers(gm, SYMM_ALL_GATHER_COALESCED)
+    assert not _gathers(gm, CE_ALL_GATHER_COALESCED)
 
 
 def _coalesced_graph(mesh, n: int, *, marked: bool = True, bound: bool = True):
@@ -363,12 +363,12 @@ def _coalesced_graph(mesh, n: int, *, marked: bool = True, bound: bool = True):
 @requires_cuda
 def test_a_pre_bucketed_bound_gather_is_retargeted(mesh_1rank):
     from magi_compiler.passes.fsdp_overlap import rewrite_weight_ag_to_copy_engine
-    from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER_COALESCED
+    from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER_COALESCED
 
     gm = _coalesced_graph(mesh_1rank, 3)
     assert rewrite_weight_ag_to_copy_engine(gm) == 1
     assert not _gathers(gm, _AG_COALESCED)
-    assert len(_gathers(gm, SYMM_ALL_GATHER_COALESCED)) == 1
+    assert len(_gathers(gm, CE_ALL_GATHER_COALESCED)) == 1
 
 
 @requires_cuda

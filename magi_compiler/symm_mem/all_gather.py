@@ -28,8 +28,8 @@ _LIB = torch.library.Library("magi", "FRAGMENT")
 # Signatures mirror ``_c10d_functional::all_gather_into_tensor`` / ``_coalesced`` so
 # the rewrite pass can retarget a node without rebuilding its args.  That is also the
 # only reason ``group_name`` is here: the copy engine reads peers from the SymmBuffer.
-_SCHEMA = "symm_all_gather(Tensor local, int group_size, str group_name) -> Tensor"
-_SCHEMA_COALESCED = "symm_all_gather_coalesced(Tensor[] shards, int group_size, str group_name) -> Tensor[]"
+_SCHEMA = "ce_all_gather(Tensor local, int group_size, str group_name) -> Tensor"
+_SCHEMA_COALESCED = "ce_all_gather_coalesced(Tensor[] shards, int group_size, str group_name) -> Tensor[]"
 
 # One gather: where it lands, the local shard, and every rank's view of that shard.
 _Gather = tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, ...]]
@@ -133,7 +133,7 @@ def _shard_peers(local: torch.Tensor, group_size: int) -> tuple[torch.Tensor, ..
     entry = lookup_shard(local.data_ptr())
     if entry is None:
         raise RuntimeError(
-            "magi::symm_all_gather got a tensor that is not a registered symmetric-memory shard. "
+            "magi::ce_all_gather got a tensor that is not a registered symmetric-memory shard. "
             "Only weights materialized through a SymmBuffer can be gathered by the copy engine; "
             "the rewrite pass should have left this gather on NCCL."
         )
@@ -185,7 +185,7 @@ def _gather_dest(local: torch.Tensor, group_size: int) -> torch.Tensor:
     return local.new_empty((local.shape[0] * group_size, *local.shape[1:]))
 
 
-def _symm_all_gather(local: torch.Tensor, group_size: int, group_name: str) -> torch.Tensor:
+def _ce_all_gather(local: torch.Tensor, group_size: int, group_name: str) -> torch.Tensor:
     peers = _shard_peers(local, group_size)
     out = _gather_dest(local, group_size)
     event = _issue_gathers([(out, local, peers)])
@@ -193,11 +193,11 @@ def _symm_all_gather(local: torch.Tensor, group_size: int, group_name: str) -> t
     return out
 
 
-def _symm_all_gather_meta(local: torch.Tensor, group_size: int, group_name: str) -> torch.Tensor:
+def _ce_all_gather_meta(local: torch.Tensor, group_size: int, group_name: str) -> torch.Tensor:
     return _gather_dest(local, group_size)
 
 
-def _symm_all_gather_coalesced(shards: list[torch.Tensor], group_size: int, group_name: str) -> list[torch.Tensor]:
+def _ce_all_gather_coalesced(shards: list[torch.Tensor], group_size: int, group_name: str) -> list[torch.Tensor]:
     """One stream sync, one batch, one event for the whole bucket -- not one per member."""
     gathers: list[_Gather] = []
     for local in shards:
@@ -211,23 +211,23 @@ def _symm_all_gather_coalesced(shards: list[torch.Tensor], group_size: int, grou
     return outs
 
 
-def _symm_all_gather_coalesced_meta(shards: list[torch.Tensor], group_size: int, group_name: str) -> list[torch.Tensor]:
+def _ce_all_gather_coalesced_meta(shards: list[torch.Tensor], group_size: int, group_name: str) -> list[torch.Tensor]:
     return [_gather_dest(local, group_size) for local in shards]
 
 
 def _register() -> None:
     _LIB.define(_SCHEMA)
-    _LIB.impl("symm_all_gather", _symm_all_gather, "CUDA")
-    _LIB.impl("symm_all_gather", _symm_all_gather_meta, "Meta")
+    _LIB.impl("ce_all_gather", _ce_all_gather, "CUDA")
+    _LIB.impl("ce_all_gather", _ce_all_gather_meta, "Meta")
 
     _LIB.define(_SCHEMA_COALESCED)
-    _LIB.impl("symm_all_gather_coalesced", _symm_all_gather_coalesced, "CUDA")
-    _LIB.impl("symm_all_gather_coalesced", _symm_all_gather_coalesced_meta, "Meta")
+    _LIB.impl("ce_all_gather_coalesced", _ce_all_gather_coalesced, "CUDA")
+    _LIB.impl("ce_all_gather_coalesced", _ce_all_gather_coalesced_meta, "Meta")
 
 
 _register()
 
 # Importing this module is what makes the ops exist, so these are always bound --
 # callers guard the import, not the value.
-SYMM_ALL_GATHER = torch.ops.magi.symm_all_gather.default
-SYMM_ALL_GATHER_COALESCED = torch.ops.magi.symm_all_gather_coalesced.default
+CE_ALL_GATHER = torch.ops.magi.ce_all_gather.default
+CE_ALL_GATHER_COALESCED = torch.ops.magi.ce_all_gather_coalesced.default

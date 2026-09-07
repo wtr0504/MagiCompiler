@@ -84,7 +84,7 @@ def bind_weights_for_copy_engine(graph: fx.GraphModule, example_inputs: Sequence
 
 def rewrite_weight_ag_to_copy_engine(graph: fx.GraphModule) -> int:
     """Retarget CE_BOUND weight gathers onto copy-engine ops. Returns how many."""
-    from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER, SYMM_ALL_GATHER_COALESCED
+    from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER, CE_ALL_GATHER_COALESCED
 
     rewritten = 0
     skipped = 0
@@ -96,7 +96,7 @@ def rewrite_weight_ag_to_copy_engine(graph: fx.GraphModule) -> int:
         if not is_ce_bound(node):
             skipped += 1
             continue
-        node.target = SYMM_ALL_GATHER if node.target is _ALL_GATHER else SYMM_ALL_GATHER_COALESCED
+        node.target = CE_ALL_GATHER if node.target is _ALL_GATHER else CE_ALL_GATHER_COALESCED
         rewritten += 1
 
     if rewritten:

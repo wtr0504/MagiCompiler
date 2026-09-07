@@ -39,7 +39,7 @@ With ``--modes-only`` (>=2 ranks, gloo, no CUDA / no compile): drive
 the expected mode for each rung of the ladder (identical / slot / pinned / abort).
 
 With ``--copy-engine``: the same shape, but the gathers are
-``magi::symm_all_gather`` reading a symmetric buffer.  Two things are checked that
+``magi::ce_all_gather`` reading a symmetric buffer.  Two things are checked that
 NCCL does not exercise.  First, recognition: the gather is a plain fallback
 kernel with an alias node between it and its wait, so the pass has to see through
 that or it silently plans nothing.  Second, slot safety: the gathers cycle
@@ -170,7 +170,7 @@ def main() -> None:
     ce_shards: list = []
     if args.copy_engine:
         from magi_compiler.symm_mem import alloc_shard, publish
-        from magi_compiler.symm_mem.all_gather import SYMM_ALL_GATHER
+        from magi_compiler.symm_mem.all_gather import CE_ALL_GATHER
 
         for i in range(N_CE_LAYERS):
             s = alloc_shard((H, H), torch.bfloat16, torch.device("cuda", dev), grp)
@@ -184,7 +184,7 @@ def main() -> None:
             y = _WAIT(_AR(y, "sum", grp))
             acc = None
             for i, sh in enumerate(shards):
-                g = _WAIT(SYMM_ALL_GATHER(sh, world, grp))
+                g = _WAIT(CE_ALL_GATHER(sh, world, grp))
                 z = y @ g.reshape(world * H, H)[:H]
                 acc = z if acc is None else acc + z
             return acc
@@ -239,7 +239,7 @@ def main() -> None:
         fallback kernel at 0us, so without this the launches barely move."""
         from torch._inductor.comms import estimate_op_runtime
 
-        if _ro._is_symm_ag_ir(_ro._leaf_collective_node(snode)):
+        if _ro._is_ce_ag_ir(_ro._leaf_collective_node(snode)):
             return 1e7  # 10ms, far more than the whole graph's compute
         return estimate_op_runtime(snode)
 
