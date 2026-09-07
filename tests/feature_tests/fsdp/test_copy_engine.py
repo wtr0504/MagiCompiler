@@ -270,9 +270,9 @@ def test_rewriting_nothing_leaves_the_graph_untouched(mesh_1rank):
 def test_selection_matches_what_the_lowering_pass_emits(mesh_1rank):
     """The candidate shape has to match what lowering really produces, not what
     this file thinks it produces."""
-    from test_fsdp_overlap_lowering import _build_redistribute_graph
-
     from magi_compiler.passes.fsdp_overlap import lower_prim_redistribute_to_collectives, rewrite_weight_ag_to_copy_engine
+
+    from .test_fsdp_overlap_lowering import _build_redistribute_graph
 
     gm = _build_redistribute_graph(mesh_1rank, "model_fc1_weight_parameter")
     lower_prim_redistribute_to_collectives(gm)
