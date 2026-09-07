@@ -72,18 +72,7 @@ def _is_weight_all_gather(node: fx.Node) -> bool:
 
 
 def _local_shard_bytes(ag: fx.Node) -> int:
-    """Bytes one rank contributes to a weight all_gather -- the gathered size divided
-    by the world, NOT the local shard's own meta.
-
-    Used to cap coalesced bucket size, so it has to be rank-identical: ranks that cut
-    a bucket at different members submit coalesced launches with different membership,
-    which never completes.  Reading the gather's INPUT meta happens to be safe for a
-    graph this repo lowered -- the trailing ranks of an uneven ``Shard(0)`` own fewer
-    rows, but the pad in front of the gather brings them back to ``chunk`` -- and that
-    is far too subtle a thing to rest a collective on.  A gather matched by
-    ``_gathers_a_weight`` rather than emitted by the lowering has no such pad.  The
-    gather's own ``example_value`` is ``(world * chunk, ...)`` on every rank
-    unconditionally."""
+    """Bytes one rank contributes to a weight all_gather"""
     m = ag.meta.get("example_value")
     if m is None:
         return 0
