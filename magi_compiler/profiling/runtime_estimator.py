@@ -45,7 +45,7 @@ Triton stays analytical while free symbols exist.
 """
 
 import dataclasses
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from torch._inductor.runtime.benchmarking import benchmarker
@@ -90,21 +90,81 @@ class ProfileEntry:
     reuse_count: int = 0  # how many later snodes reused this entry
 
 
+def _fx_node_of(node) -> Optional[torch.fx.Node]:
+    """The fx node an IR node was lowered from.
+
+    ``origin_node`` is left unset by several ExternKernel subclasses -- notably
+    ``UserDefinedTritonKernel``, whose lowering builds it with positional args
+    only.  ``ExternKernel.__init__`` always records the node being lowered as
+    ``fx_node``, so fall back to that; without it every user-defined Triton
+    kernel is unreplayable and silently costs 0.
+    """
+    if node is None:
+        return None
+    origin = node.get_origin_node() if hasattr(node, "get_origin_node") else None
+    if origin is not None:
+        return origin
+    fx_node = getattr(node, "fx_node", None)
+    return fx_node if isinstance(fx_node, torch.fx.Node) else None
+
+
+def _iter_tensor_metas(value):
+    """Every FakeTensor meta reachable from an fx arg, recursing into containers.
+
+    The user-defined Triton HOP passes its tensors inside a nested ``kwargs``
+    dict, so a flat scan over ``args``/``kwargs`` sees no shapes at all.
+    """
+    if isinstance(value, torch.fx.Node):
+        ev = value.meta.get("val")
+        if isinstance(ev, torch.Tensor):
+            yield ev
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_tensor_metas(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_tensor_metas(item)
+
+
+def _fx_target_name(fx_node: Optional[torch.fx.Node], node) -> str:
+    """Op identity string.  All user-defined Triton kernels share one HOP target,
+    so qualify it with the kernel's own name -- otherwise hundreds of distinct
+    kernels collapse onto a single cache entry."""
+    if fx_node is None:
+        return type(node).__name__ if node is not None else "?"
+    target = str(fx_node.target)
+    kernel_name = _triton_kernel_name(fx_node)
+    return f"{target}:{kernel_name}" if kernel_name else target
+
+
+def _triton_kernel_name(fx_node: torch.fx.Node) -> Optional[str]:
+    """Name of the user-defined Triton kernel this node launches, if any."""
+    kernel_idx = (fx_node.kwargs or {}).get("kernel_idx")
+    if not isinstance(kernel_idx, int):
+        return None
+    try:
+        from torch._higher_order_ops.triton_kernel_wrap import kernel_side_table
+
+        kernel = kernel_side_table.get_kernel(kernel_idx)
+    except Exception:  # noqa: BLE001
+        return str(kernel_idx)
+    fn = getattr(kernel, "fn", kernel)
+    return getattr(fn, "__name__", None) or str(kernel_idx)
+
+
 def _snode_label(snode: BaseSchedulerNode, max_shapes: int = 3) -> str:
     """Human-readable identity for the profile table: op target + first few input
     shapes (for logs only; the cache key is ``_structural_key``)."""
     node = getattr(snode, "node", None)
-    origin = node.get_origin_node() if (node is not None and hasattr(node, "get_origin_node")) else None
-    target = str(getattr(origin, "target", type(node).__name__ if node is not None else "?"))
+    origin = _fx_node_of(node)
+    target = _fx_target_name(origin, node)
     target = target.split("(")[0].split(" ")[-1][-40:]
     shapes = []
     if origin is not None:
-        for a in (*origin.args, *getattr(origin, "kwargs", {}).values()):
-            ev = a.meta.get("val") if isinstance(a, torch.fx.Node) else None
-            if isinstance(ev, torch.Tensor):
-                shapes.append("x".join(str(x) for x in _static(ev.shape)))
-                if len(shapes) >= max_shapes:
-                    break
+        for ev in _iter_tensor_metas((*origin.args, *getattr(origin, "kwargs", {}).values())):
+            shapes.append("x".join(str(x) for x in _static(ev.shape)))
+            if len(shapes) >= max_shapes:
+                break
     return f"{target}[{','.join(shapes)}]" if shapes else target
 
 
@@ -126,14 +186,12 @@ def _structural_key(snode: BaseSchedulerNode) -> tuple | None:
         node = getattr(n, "node", None)
         if node is None:
             return None
-        origin = node.get_origin_node() if hasattr(node, "get_origin_node") else None
-        target = str(getattr(origin, "target", type(node).__name__))
+        origin = _fx_node_of(node)
+        target = _fx_target_name(origin, node)
         shapes: list[Any] = []
         if origin is not None:
-            for a in (*origin.args, *origin.kwargs.values()):
-                ev = a.meta.get("val") if isinstance(a, torch.fx.Node) else None
-                if isinstance(ev, torch.Tensor):
-                    shapes.append((tuple(_static(ev.shape)), str(ev.dtype)))
+            for ev in _iter_tensor_metas((*origin.args, *origin.kwargs.values())):
+                shapes.append((tuple(_static(ev.shape)), str(ev.dtype)))
         parts.append((target, tuple(shapes)))
     return tuple(parts)
 
@@ -222,7 +280,7 @@ def _extern_replay_fn(snode: ExternKernelSchedulerNode):
     Replay inputs: generic ``_realize_arg``, then an optional same-signature
     hook (``materialize_inputs``) that rebuilds value-consistent metadata.
     """
-    fx_node = snode.node.get_origin_node()
+    fx_node = _fx_node_of(snode.node)
     if fx_node is None:
         return None
     target = fx_node.target
@@ -256,7 +314,9 @@ def _measure_extern(snode: ExternKernelSchedulerNode, fixed_iters: bool = False)
     -> NCCL count mismatch -> deadlock."""
     fn = _extern_replay_fn(snode)
     if fn is None:
-        return 0.0
+        # Never report 0: an unreplayable op is unknown, not free, and a silent 0
+        # makes the overlap pass treat a real kernel as a gap it can hoist across.
+        raise RuntimeError(f"{snode.get_name()}: no replayable fx node, cannot measure")
     if fixed_iters:
         return _time_fixed(fn)
     fn()  # warmup / correctness
@@ -562,8 +622,10 @@ class ProfilingRuntimeEstimator:
             snode = self._key_snode.get(k)
             dist.barrier(group=group)
             # snode is non-None on every rank by measurable_reprs construction.
-            local_ns[k] = self._measure_one(snode)
-            measured_here.add(k)
+            ns, ok = self._measure_one(snode)
+            local_ns[k] = ns
+            if ok:
+                measured_here.add(k)
             dist.barrier(group=group)
 
         gathered: list = [None] * world
@@ -601,24 +663,25 @@ class ProfilingRuntimeEstimator:
         self._key_snode.clear()  # drop snode refs (unpicklable) once sync is done
         return n
 
-    def _measure_one(self, snode: BaseSchedulerNode) -> float:
+    def _measure_one(self, snode: BaseSchedulerNode) -> tuple[float, bool]:
         """Lockstep-safe single measurement (fixed iters for anything containing a
-        collective); never raises -- falls back to the analytical estimate."""
+        collective).  Never raises; returns ``(ns, measured)`` so the caller can
+        tell a real timing from the analytical fallback."""
         try:
             if _leaf_ce_ag(snode) is not None:
-                return _measure_ce_ag(snode)
+                return _measure_ce_ag(snode), True
             if contains_collective(snode):
-                return _measure_collective_op(snode)
+                return _measure_collective_op(snode), True
             if isinstance(snode, ExternKernelSchedulerNode):
                 fixed = _extern_has_internal_collective(snode)
                 with _shapeenv_sandbox(), _suppress_guards():
                     ns = _measure_extern(snode, fixed_iters=fixed)
                 self.n_measured += 1
-                return ns
-            return self._measure(snode)
+                return ns, True
+            return self._measure(snode), True
         except BaseException as exc:  # noqa: BLE001
-            magi_logger.debug("warm/sync measure fell back to analytical for %s: %s", snode.get_name(), exc)
-            return _safe_analytical(snode)
+            magi_logger.warning("warm/sync measure fell back to analytical for %s: %s", snode.get_name(), exc)
+            return _safe_analytical(snode), False
 
     def summary(self) -> str:
         """One line per distinct op + a machine-parseable ``ESTLINE`` tag

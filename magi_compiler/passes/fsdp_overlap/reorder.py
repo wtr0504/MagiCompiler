@@ -28,9 +28,13 @@ Not enough upstream compute -> as-early-as-legal (never worse than raise_comms).
 Algorithm: two-pointer back-to-front sweep.  Gathers are visited in reverse
 program order; a single compute pointer walks backward continuously and is never
 reset, so each gather claims a disjoint run of compute (serializing the single
-NCCL stream) and targets only decrease.  All moves are applied in one stable-sort
-rebuild and validated once (``_validate_full``) -- the Inductor driver does NOT
-repair the returned order, so it must be a valid topological order.
+transfer stream) and targets only decrease.  Compute is claimed a whole node at a
+time, so the gather that stops in front of a long kernel leaves most of it unused;
+that remainder carries to the next gather instead of being discarded, which is
+what keeps a 95us collective from spending a 33ms attention.  All moves are
+applied in one stable-sort rebuild and validated once (``_validate_full``) -- the
+Inductor driver does NOT repair the returned order, so it must be a valid
+topological order.
 
 Handles both lowering forms: plain all_gather (1 launch / 1 wait) and coalesced
 (1 packed launch + N MultiOutput members moved together as one block + N waits).
@@ -318,25 +322,25 @@ class FsdpOverlapReorder:
 
         targets: dict = {}  # launch -> target index (in original order space)
         compute_idx = len(order)  # scan compute strictly below this
+        carry = 0.0  # runtime the previous gather left unspent in its boundary node
         for launch, group, fc_idx, comm_runtime, lower in reversed(plans):
             cur = index_of[launch]
             # Start just before the launch, but no later than where the previous
             # (later) gather already consumed compute down to.
             compute_idx = min(compute_idx, cur)
             need = comm_runtime * self.comm_overlap_window_scale + self.comm_overlap_window_margin_ns
-            acc = 0.0
+            acc = carry_in = carry
             t = compute_idx
-            while t > lower:
+            while acc < need and t > lower:
                 s = order[t - 1]
                 if self._is_compute(s):
                     acc += self._cost(s)
                 t -= 1
-                if acc >= need:
-                    break
             # target == cur means no upstream compute left (graph head or previous
             # gather claimed it); target >= lower keeps real producers before it.
             target = max(lower, t)
             targets[launch] = (target, group)
+            carry = max(0.0, acc - need)
             compute_idx = target  # next (earlier) gather resumes from actual placement
             # Per-gather placement decision, the record that answers "why didn't
             # this gather move earlier":
@@ -345,13 +349,16 @@ class FsdpOverlapReorder:
             #   lower     = earliest LEGAL index (real-dep floor) it could move to
             #   fc_idx    = first real consumer (the wait's user)
             #   comm      = the gather's runtime it needs to hide
-            #   acc_upstream = compute actually found in [target, cur] to hide it
+            #   carry_in  = capacity inherited from the later gather's boundary node
+            #               (target==cur with a large carry_in means it was already
+            #               covered and did not have to move at all)
+            #   acc_upstream = carry_in plus the compute found in [target, cur]
             #   verdict   = hidden (acc>=need) | COMPUTE-LIMITED (ran out of upstream
             #               compute before covering comm -- i.e. hit `lower` or the
             #               previous gather's placement first)
             magi_logger.debug(
                 "FSDP overlap placement: launch %s(%s) cur=%d -> target=%d fc=%d lower=%d | "
-                "comm=%.1fus acc_upstream=%.1fus need=%.1fus %s",
+                "comm=%.1fus carry_in=%.1fus acc_upstream=%.1fus need=%.1fus %s",
                 launch.get_name(),
                 getattr(_leaf_collective_node(launch), "op_overload", "?"),
                 cur,
@@ -359,6 +366,7 @@ class FsdpOverlapReorder:
                 fc_idx,
                 lower,
                 comm_runtime / 1e3,
+                carry_in / 1e3,
                 acc / 1e3,
                 need / 1e3,
                 "hidden" if acc >= need else "COMPUTE-LIMITED",
